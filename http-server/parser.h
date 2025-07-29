@@ -46,7 +46,7 @@ struct http_request {
 };
 
 struct http_request *http_request_reader(int client_fd, unsigned int *status_code, int *close_connection);
-ssize_t http_response_sender(int client_fd, struct http_response *http_response);
+ssize_t http_response_sender(int client_fd, struct http_response *http_response, int close_connection);
 
 ssize_t parse_request_line(char *buf_start, size_t size, struct request_line *req_line, unsigned int *status_code);
 ssize_t parse_headers(char *buf_start, size_t size, struct_header ***headers_ptr, unsigned int *status_code);

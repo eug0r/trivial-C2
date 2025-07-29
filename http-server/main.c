@@ -105,7 +105,7 @@ int accept_routine(int server_fd, struct client_info *client) {
 			else {
 				//send() proper http response for the error status code.
 				http_response->content_length = 0;
-				http_response->headers = hash_init_table();
+				/* http_response->headers = hash_init_table();
 				struct_header *connection_header = calloc(1, sizeof(struct_header));
 				if (connection_header  == NULL) {
 					fprintf(stderr, "failed to allocate.\n");
@@ -115,8 +115,8 @@ int accept_routine(int server_fd, struct client_info *client) {
 				}
 				connection_header->key = "Connection";
 				connection_header->value = "close";
-				hash_add_node(http_response->headers, connection_header);
-				ssize_t bytes_sent = http_response_sender(client_fd, http_response);
+				hash_add_node(http_response->headers, connection_header); */
+				ssize_t bytes_sent = http_response_sender(client_fd, http_response, 1); //1 sets the connection: close header
 				printf("%zu bytes were sent.\n", bytes_sent);
 				http_response_free(http_response, HTTP_FREE_HDRS);
 				break; //closing connection
@@ -126,7 +126,7 @@ int accept_routine(int server_fd, struct client_info *client) {
 			//pass it to the router which in turn passes it to the handlers.
 			int result = echo_handler(http_response, http_request);
 			if (result == 0) { //success
-				size_t bytes_sent = http_response_sender(client_fd, http_response);
+				size_t bytes_sent = http_response_sender(client_fd, http_response, close_connection);
 				printf("%zu bytes were sent.\n", bytes_sent);
 			} //what to do with result != error code?
 			http_request_free(http_request, HTTP_FREE_BODY);

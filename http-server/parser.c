@@ -376,7 +376,7 @@ void http_response_free(struct http_response *http_response, int mode) {
 
 }
 
-ssize_t http_response_sender(int client_fd, struct http_response *http_response) {
+ssize_t http_response_sender(int client_fd, struct http_response *http_response, int close_connection) {
     //initialize the struct to zero before filling with data and passing here
     size_t bufsiz = BUFSIZ;
     char *msg_buf = malloc(BUFSIZ); //free at the end, return number of bytes sent
@@ -442,10 +442,17 @@ ssize_t http_response_sender(int client_fd, struct http_response *http_response)
             }
         }
     }
+    if (close_connection) {
+        cur_len = strlen("Connection: close") + 2; //CRLF
+        HTTP_RESPONSE_BUF_REALLOC();
+        snprintf(msg_buf + msg_len, bufsiz - msg_len, "Connection: close\r\n");
+        msg_len += cur_len;
+    }
     cur_len = strlen("Content-Length: ") + snprintf(NULL, 0, "%lld", http_response->content_length) + 4; //\r\n\r\n
     HTTP_RESPONSE_BUF_REALLOC();
     snprintf(msg_buf + msg_len, bufsiz - msg_len, "Content-Length: %lld\r\n\r\n", http_response->content_length);
     msg_len += cur_len;
+
 
     if (http_response->content_length != 0) {
         cur_len  = http_response->content_length;
