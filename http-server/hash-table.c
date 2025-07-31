@@ -23,7 +23,7 @@ void hash_add_node(struct ht_node **table, struct ht_node *node) {
     node->next = table[hash];
     table[hash] = node;
 }
-struct ht_node *hash_lookup_node(const struct ht_node **table, const char *key) {
+struct ht_node *hash_lookup_node(struct ht_node **table, const char *key) {
     unsigned long hash = hash_generate(key);
     const struct ht_node *curr = table[hash];
     while (curr) {

@@ -249,6 +249,15 @@ ssize_t parse_request_line(char *buf_start, size_t size, struct request_line *re
 }
 ssize_t parse_headers(char *buf_start, size_t size, struct_header ***headers_ptr, unsigned int *status_code) {
     char *pos = buf_start; //buf_start remains the base
+    if (size == 2 && buf_start[0] == '\r' && buf_start [1] == '\n') { //empty headers
+        *headers_ptr = hash_init_table();
+        if (*headers_ptr == NULL) {
+            fprintf(stderr,"failed to allocate\n");
+            *status_code = 500;
+            return -1;
+        }
+        return 2; //parsed two bytes
+    }
     for (ssize_t i = 0; i < size - 3; i++) {
         if (buf_start[i] == '\r' &&
             buf_start[i+1] == '\n' &&
@@ -256,6 +265,11 @@ ssize_t parse_headers(char *buf_start, size_t size, struct_header ***headers_ptr
             buf_start[i+3] == '\n') {
             //headers found
             *headers_ptr = hash_init_table();
+            if (*headers_ptr == NULL) {
+                fprintf(stderr,"failed to allocate\n");
+                *status_code = 500;
+                return -1;
+            }
             struct_header **headers = *headers_ptr;
             while (true) {
                 struct_header *header = calloc(1, sizeof(struct_header));

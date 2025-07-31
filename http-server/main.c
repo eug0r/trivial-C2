@@ -3,25 +3,28 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
+#include <sys/types.h>
+#include <arpa/inet.h>
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
-
+#include <fcntl.h>
+#include <pthread.h>
 #include "hash-table.h"
 #include "parser.h"
 
-#define CONNECTION_BACKLOG 5
-
+#define CONNECTION_BACKLOG 20
+#define MAX_CLIENT_THREADS 10
 //only persistent sequential HTTP/1.1 connection is supported. no pipelining or multiplexing
 
-struct client_info {
-	struct sockaddr_in addr;
-	socklen_t len;
-};
-
-int accept_routine(int server_fd, struct client_info *client);
+void *client_routine(void *client_fd_ptr);
 int echo_handler(struct http_response *http_response, struct http_request *http_request);
 int user_agent_handler(struct http_response *http_response, struct http_request *http_request);
+
+
+void sigchld_handler() {
+
+}
 
 int main() {
 	// Disable output buffering
@@ -31,7 +34,7 @@ int main() {
 	// You can use print statements as follows for debugging, they'll be visible when running tests.
 	printf("Logs from your program will appear here!\n");
 
-	// Uncomment this block to pass the first stage
+
 	int server_fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (server_fd == -1) {
 	 	fprintf(stderr,"Socket creation failed: %s...\n", strerror(errno));
@@ -64,24 +67,47 @@ int main() {
 
 	printf("Waiting for a client to connect...\n");
 
-	struct client_info client_list [CONNECTION_BACKLOG] = {0};
-	accept_routine(server_fd, &client_list[0]); //call in a loop to handle more clients
-	//accept(server_fd, (struct sockaddr *) &client_addr, &client_addr_len);
-	//printf("Client connected\n");
+	pthread_t client_threads[MAX_CLIENT_THREADS];
 
-	close(server_fd);
+	for (size_t i = 0;;i++) {
+		struct sockaddr_in cli_addr;
+		socklen_t cli_len = sizeof(cli_addr);
+		int client_fd = accept(server_fd, (struct sockaddr *)&cli_addr, &cli_len);
+		if (client_fd == -1) {
+			fprintf(stderr, "accept no %zu failed: %s\n", i, strerror(errno));
+			continue;
+		} //client connected
+		char ip_addr_pres[INET_ADDRSTRLEN];
+		inet_ntop(AF_INET, &cli_addr.sin_addr, ip_addr_pres, sizeof(ip_addr_pres));
+		printf("server: got connection from %s\n", ip_addr_pres);
+		pthread_t client_th;
+
+		int *fd_ptr = malloc(sizeof client_fd);
+		if (fd_ptr == NULL) {
+			perror("malloc");
+			close(client_fd);
+			continue;
+		}
+		*fd_ptr = client_fd;
+		int ret = pthread_create(&client_th, NULL, client_routine, fd_ptr);
+		if (ret) {
+			fprintf(stderr, "pthread_create(id[%zu]): %s\n", i, strerror(ret));
+			free(fd_ptr);
+			return 1; //graceful exiting needed
+		}
+		printf("thread %zu created.\n", i);
+		pthread_detach(client_th);
+	}
+	//if joining threads do it here
+
+	close(server_fd); //need to listen for commands to break the look and run this
 
 	return 0;
 }
 
-int accept_routine(int server_fd, struct client_info *client) {
-	client->len = sizeof(client->addr);
-	int client_fd = accept(server_fd, (struct sockaddr *)&client->addr, &client->len);
-	if (client_fd == -1) {
-		fprintf(stderr,"accept failed: %s \n", strerror(errno));
-		return -1;
-	}
-	printf("Client connected\n");
+void *client_routine(void *client_fd_ptr) {
+	int client_fd = *(int *)client_fd_ptr;
+	free(client_fd_ptr);
 
 	int close_connection = 0;
 	while (!close_connection) {
@@ -89,7 +115,7 @@ int accept_routine(int server_fd, struct client_info *client) {
 		if (http_response == NULL) {
 			fprintf(stderr, "failed to allocate.\n");
 			close(client_fd);
-			return -1; //not sure about the return codes
+			return NULL; //not sure about the return codes
 		}
 		http_response->stat_line.status_code = 0;
 		struct http_request *http_request = http_request_reader(client_fd, &http_response->stat_line.status_code, &close_connection);
@@ -100,7 +126,7 @@ int accept_routine(int server_fd, struct client_info *client) {
 					break; //connection closed by the client
 				}
 				close(client_fd);
-				return -1; //failed to allocate before even reading
+				return NULL; //failed to allocate before even reading
 			}
 			else {
 				//send() proper http response for the error status code.
@@ -118,13 +144,14 @@ int accept_routine(int server_fd, struct client_info *client) {
 				hash_add_node(http_response->headers, connection_header); */
 				ssize_t bytes_sent = http_response_sender(client_fd, http_response, 1); //1 sets the connection: close header
 				printf("%zu bytes were sent.\n", bytes_sent);
-				http_response_free(http_response, HTTP_FREE_HDRS);
+				http_response_free(http_response, HTTP_FREE_STRCT); //FREE_HDRS if you uncomment the code and pass 0
 				break; //closing connection
 			}
 		}
 		else {
 			//pass it to the router which in turn passes it to the handlers.
-			int result = echo_handler(http_response, http_request);
+			//caller_routing_callback_fn()
+			int result = echo_handler(http_response, http_request); //so handlers return 0 if they succeed
 			if (result == 0) { //success
 				size_t bytes_sent = http_response_sender(client_fd, http_response, close_connection);
 				printf("%zu bytes were sent.\n", bytes_sent);
@@ -134,7 +161,8 @@ int accept_routine(int server_fd, struct client_info *client) {
 		}
 	}
 	close(client_fd);
-	return 0;
+	//malloc copy result
+	return NULL; //return (void *)&result //in case we join the threads and collect their returns value
 }
 
 int echo_handler(struct http_response *http_response, struct http_request *http_request) {
