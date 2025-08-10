@@ -1,14 +1,13 @@
 
 #include "jansson.h"
 #include "sqlite3.h"
+#include "uuid/uuid.h"
 #include "handlers.h"
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <unistd.h>
-#include <uuid/uuid.h>
-#include "uuid/uuid.h"
-
+//#include <uuid/uuid.h>
 #include "hash-table.h"
 #include "http-parser.h"
 
