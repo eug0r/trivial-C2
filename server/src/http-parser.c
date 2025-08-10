@@ -1,7 +1,6 @@
 
 
-#include "parser.h"
-
+#include "http-parser.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <sys/socket.h>
@@ -21,6 +20,7 @@ struct http_status_code_reason http_status_list[HTTP_STATUS_COVERED] =
     {.code=411, .reason = "411 Length Required"},
     {.code=413, .reason = "413 Content Too Large"},
     {.code=505, .reason = "505 HTTP Version Not Supported"},
+    {.code=415, .reason = "415 Unsupported Media Type"}
 };
 
 struct http_request *http_request_reader(int client_fd, unsigned int *status_code, int *close_connection) {
@@ -462,9 +462,9 @@ ssize_t http_response_sender(int client_fd, struct http_response *http_response,
         snprintf(msg_buf + msg_len, bufsiz - msg_len, "Connection: close\r\n");
         msg_len += cur_len;
     }
-    cur_len = strlen("Content-Length: ") + snprintf(NULL, 0, "%lld", http_response->content_length) + 4; //\r\n\r\n
+    cur_len = strlen("Content-Length: ") + snprintf(NULL, 0, "%zu", http_response->content_length) + 4; //\r\n\r\n
     HTTP_RESPONSE_BUF_REALLOC();
-    snprintf(msg_buf + msg_len, bufsiz - msg_len, "Content-Length: %lld\r\n\r\n", http_response->content_length);
+    snprintf(msg_buf + msg_len, bufsiz - msg_len, "Content-Length: %zu\r\n\r\n", http_response->content_length);
     msg_len += cur_len;
 
 

@@ -1,5 +1,5 @@
-#ifndef PARSER_H
-#define PARSER_H
+#ifndef HTTP_PARSER_H
+#define HTTP_PARSER_H
 
 #include <stdlib.h>
 
@@ -14,7 +14,7 @@ struct status_line { //only 1.1 is supported for now so it will be hardcoded in 
 struct http_response {
     struct status_line stat_line;
     struct_header **headers;
-    long long content_length;
+    size_t content_length;
     char *body;
     //char *trailers;
 };
@@ -41,7 +41,7 @@ it particularly checks for "set-cookie" header name at first and stores them in 
 struct http_request {
     struct request_line req_line;
     struct_header **headers;
-    long long content_length; //mandatory, not accepting Transfer-Encoding
+    size_t content_length; //mandatory, not accepting Transfer-Encoding
     char *body;
 };
 
@@ -63,11 +63,11 @@ struct http_status_code_reason {
     unsigned int code;
     const char *reason;
 };
-#define HTTP_STATUS_COVERED 8
+#define HTTP_STATUS_COVERED 9
 extern struct http_status_code_reason http_status_list[HTTP_STATUS_COVERED];
 
 
-#endif //PARSER_H
+#endif //HTTP_PARSER_H
 
 
 /*

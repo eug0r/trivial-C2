@@ -11,29 +11,25 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include "hash-table.h"
-#include "parser.h"
+#include "http-parser.h"
 
 #define CONNECTION_BACKLOG 20
 #define MAX_CLIENT_THREADS 10
 //only persistent sequential HTTP/1.1 connection is supported. no pipelining or multiplexing
+//header keys are stored as lowercase
 
-void *client_routine(void *client_fd_ptr);
+void *client_routine(void *args);
 int echo_handler(struct http_response *http_response, struct http_request *http_request);
 int user_agent_handler(struct http_response *http_response, struct http_request *http_request);
+struct cli_routine_args {
+	int client_fd;
+	int (*router_fn)(struct http_response *, struct http_request *);
+};
 
-
-void sigchld_handler() {
-
-}
-
-int main() {
+int http_init_server(int (*router)(struct http_response *, struct http_request *)) {
 	// Disable output buffering
 	setbuf(stdout, NULL);
  	setbuf(stderr, NULL);
-
-	// You can use print statements as follows for debugging, they'll be visible when running tests.
-	printf("Logs from your program will appear here!\n");
-
 
 	int server_fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (server_fd == -1) {
@@ -67,7 +63,7 @@ int main() {
 
 	printf("Waiting for a client to connect...\n");
 
-	pthread_t client_threads[MAX_CLIENT_THREADS];
+	//pthread_t client_threads[MAX_CLIENT_THREADS]; // unlimited for now
 
 	for (size_t i = 0;;i++) {
 		struct sockaddr_in cli_addr;
@@ -82,17 +78,18 @@ int main() {
 		printf("server: got connection from %s\n", ip_addr_pres);
 		pthread_t client_th;
 
-		int *fd_ptr = malloc(sizeof client_fd);
-		if (fd_ptr == NULL) {
+		struct cli_routine_args *ptr = malloc(sizeof(struct cli_routine_args));
+		if (ptr == NULL) {
 			perror("malloc");
 			close(client_fd);
 			continue;
 		}
-		*fd_ptr = client_fd;
-		int ret = pthread_create(&client_th, NULL, client_routine, fd_ptr);
+		ptr->client_fd = client_fd;
+		ptr->router_fn = router;
+		int ret = pthread_create(&client_th, NULL, client_routine, ptr);
 		if (ret) {
 			fprintf(stderr, "pthread_create(id[%zu]): %s\n", i, strerror(ret));
-			free(fd_ptr);
+			free(ptr);
 			return 1; //graceful exiting needed
 		}
 		printf("thread %zu created.\n", i);
@@ -101,13 +98,15 @@ int main() {
 	//if joining threads do it here
 
 	close(server_fd); //need to listen for commands to break the look and run this
-
+	//create a back-channel thread on another port
+	//that you can connect to and send the termination command or something
 	return 0;
 }
 
-void *client_routine(void *client_fd_ptr) {
-	int client_fd = *(int *)client_fd_ptr;
-	free(client_fd_ptr);
+void *client_routine(void *args) {
+	int client_fd = ((struct cli_routine_args*)args)->client_fd;
+	int (*router_fn)(struct http_response *, struct http_request *) = ((struct cli_routine_args*)args)->router_fn;
+	free(args);
 
 	int close_connection = 0;
 	while (!close_connection) {
@@ -151,11 +150,11 @@ void *client_routine(void *client_fd_ptr) {
 		else {
 			//pass it to the router which in turn passes it to the handlers.
 			//caller_routing_callback_fn()
-			int result = echo_handler(http_response, http_request); //so handlers return 0 if they succeed
+			int result = router_fn(http_response, http_request); //so handlers return 0 if they succeed
 			if (result == 0) { //success
 				size_t bytes_sent = http_response_sender(client_fd, http_response, close_connection);
 				printf("%zu bytes were sent.\n", bytes_sent);
-			} //what to do with result != error code?
+			} //non zero result add a generic error response?
 			http_request_free(http_request, HTTP_FREE_BODY);
 			http_response_free(http_response, HTTP_FREE_BODY);
 		}
