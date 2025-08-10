@@ -1,8 +1,8 @@
 # Server:
 compile and run: ./build-and-run.sh \
 __replace the vcpkg directory path with your own.__ \
-\
-If you wish to use your own libuuid installation remove it from vcpkg.json and replace its linking command in CMakeLists.txt
+__to use the testing database, change `C2_DB_PATH` in src/handlers.h to testdatabase.db.__ \
+If you wish to use your own libuuid installation remove it from vcpkg.json and replace its linking command in CMakeLists.txt.
 
 ### API:
 __post /agents:__
