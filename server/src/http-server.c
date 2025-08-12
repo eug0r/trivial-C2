@@ -15,6 +15,7 @@
 
 #define CONNECTION_BACKLOG 20
 #define MAX_CLIENT_THREADS 10
+#define HTTP_PORT_NO 4221
 //only persistent sequential HTTP/1.1 connection is supported. no pipelining or multiplexing
 //header keys are stored as lowercase
 //need to add thread pool
@@ -44,7 +45,7 @@ int http_init_server(int (*router)(struct http_response *, struct http_request *
 	}
 
 	struct sockaddr_in serv_addr = { .sin_family = AF_INET ,
-									 .sin_port = htons(4221),
+									 .sin_port = htons(HTTP_PORT_NO),
 									 .sin_addr = { htonl(INADDR_ANY) },
 									};
 

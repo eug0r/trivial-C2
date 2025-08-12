@@ -17,11 +17,12 @@ int init_database(const char *db_path) {
         "   uuid	TEXT NOT NULL UNIQUE,\n"
         "   category	TEXT NOT NULL,\n"
         "   agent_id	TEXT NOT NULL,\n"
-        "   is_done	INTEGER NOT NULL,\n"
+        "   status	INTEGER NOT NULL,\n"
         "   queue_no	INTEGER,\n"
         "   options	TEXT,\n"
         "   result	TEXT,\n"
         "   PRIMARY KEY(\"queue_no\" AUTOINCREMENT)\n"
+        "   FOREIGN KEY(\"agent_id\") REFERENCES agents(\"uuid\") ON DELETE CASCADE\n"
         ");";
 
     // create db if it doesn't exist

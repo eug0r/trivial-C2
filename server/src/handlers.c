@@ -495,7 +495,7 @@ int post_tasks(struct http_response *http_response, struct http_request *http_re
     //could also use agent id to return highest queue
     //no where is done is false then incr it and store as queue no
 
-    const char *sql2 = "INSERT INTO tasks (uuid, category, agent_id, options, is_done, result) "  \
+    const char *sql2 = "INSERT INTO tasks (uuid, category, agent_id, options, status, result) "  \
         "VALUES (?1, ?2, ?3, ?4, 0, NULL); ";
     sqlite3_stmt *ppstmt2;
     rc = sqlite3_prepare_v2(db_handle, sql2, -1, &ppstmt2, NULL);
@@ -600,7 +600,7 @@ int get_tasks(struct http_response *http_response, struct http_request *http_req
     }
 
     const char *sql = "SELECT * FROM tasks "
-    "WHERE agent_id = ?1 AND is_done = 0 "
+    "WHERE agent_id = ?1 AND status = 0 "
     "ORDER BY queue_no LIMIT 1; "; //could make limit
     //a macro to return more than one tasks,
     //after making sure the agent supports it
@@ -667,7 +667,7 @@ int get_tasks(struct http_response *http_response, struct http_request *http_req
         return -1;
     }
     sqlite3_finalize(ppstmt);
-    sqlite3_close(db_handle);
+    //sqlite3_close(db_handle);
 
     http_response->stat_line.status_code = 200;
     http_response->stat_line.reason = NULL;
@@ -703,6 +703,28 @@ int get_tasks(struct http_response *http_response, struct http_request *http_req
     hash_add_node(http_response->headers, content_type);
     //success
     json_decref(response_root);
+
+    //update tasks to pending
+    const char *sql2 = "UPDATE tasks "
+    "SET status = 1 " //pending task
+    "WHERE agent_id = ?1 AND status = 0; ";
+    sqlite3_stmt *ppstmt2;
+    rc = sqlite3_prepare_v2(db_handle, sql2, -1, &ppstmt2, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db_handle));
+        sqlite3_close(db_handle);
+        return -1;
+    }
+    sqlite3_bind_text(ppstmt2, 1, agent_id_param, -1, SQLITE_STATIC);
+    rc = sqlite3_step(ppstmt2);
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "error: %s\n", sqlite3_errmsg(db_handle));
+        sqlite3_finalize(ppstmt2);
+        sqlite3_close(db_handle);
+        return -1;
+    }
+    sqlite3_finalize(ppstmt2);
+    sqlite3_close(db_handle);
     return 0;
 }
 
@@ -788,7 +810,7 @@ int post_results(struct http_response *http_response, struct http_request *http_
         fprintf(stderr, "Opened database successfully\n");
     }
     const char *sql = "UPDATE tasks "
-    "SET result = ?1, is_done = 1 "
+    "SET result = ?1, status = 2 "
     "WHERE uuid = ?2 AND agent_id = ?3;";
     sqlite3_stmt *ppstmt;
     rc = sqlite3_prepare_v2(db_handle, sql, -1, &ppstmt, NULL);
@@ -860,7 +882,7 @@ int get_results(struct http_response *http_response, struct http_request *http_r
     path += strlen("/results");
     if (*path == '\0') {
         //return all agents' results
-        sql = "SELECT * FROM tasks WHERE is_done = 1;";
+        sql = "SELECT * FROM tasks WHERE status = 2;";
         rc = sqlite3_prepare_v2(db_handle, sql, -1, &ppstmt, NULL);
         if (rc != SQLITE_OK) {
             fprintf(stderr, "Failed to prepare statement: %s\n", sqlite3_errmsg(db_handle));
@@ -914,7 +936,7 @@ int get_results(struct http_response *http_response, struct http_request *http_r
 
         } else if (!agent_id_param && task_id_param)
         {
-            sql = "SELECT * FROM tasks WHERE is_done = 1 AND uuid = ?1;";
+            sql = "SELECT * FROM tasks WHERE status = 2 AND uuid = ?1;";
 
             rc = sqlite3_prepare_v2(db_handle, sql, -1, &ppstmt, NULL);
             if (rc != SQLITE_OK) {
@@ -926,7 +948,7 @@ int get_results(struct http_response *http_response, struct http_request *http_r
             sqlite3_bind_text(ppstmt, 1, task_id_param, -1, free); //frees task param
         } else //(agent_id_param && task_id_param)
         {
-            sql = "SELECT * FROM tasks WHERE is_done = 1 AND agent_id = ?1 AND uuid = ?2";
+            sql = "SELECT * FROM tasks WHERE status = 2 AND agent_id = ?1 AND uuid = ?2";
 
             rc = sqlite3_prepare_v2(db_handle, sql, -1, &ppstmt, NULL);
             if (rc != SQLITE_OK) {
