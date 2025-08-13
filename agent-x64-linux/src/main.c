@@ -101,7 +101,7 @@ char *agent_init(void) {
         hostname[0] = '\0';
         //return NULL;
     }
-    json_t *post_json = json_pack("{s:s, s:s}", "handle", AGENT_HANDLE, "hostname", "myhostname");
+    json_t *post_json = json_pack("{s:s, s:s}", "handle", AGENT_HANDLE, "hostname", hostname);
     char *post_str = json_dumps(post_json, 0);
     json_decref(post_json);
     if (!post_str) {
