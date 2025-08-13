@@ -152,7 +152,19 @@ void *client_routine(void *args) {
 			if (result == 0) { //success
 				size_t bytes_sent = http_response_sender(client_fd, http_response, close_connection);
 				printf("%zu bytes were sent.\n", bytes_sent);
-			} //non zero result add a 500 error response?
+			}
+			else if (result == -1) {
+				http_response_free(http_response, HTTP_FREE_BODY);
+				http_response = calloc(1, sizeof(struct http_response));
+				if (http_response == NULL) {
+					fprintf(stderr, "failed to allocate.\n");
+					close(client_fd);
+					return NULL; //not sure about the return codes
+				}
+				http_response->stat_line.status_code = 500; //internal server error
+				size_t bytes_sent = http_response_sender(client_fd, http_response, close_connection);
+				printf("%zu bytes were sent.\n", bytes_sent);
+			}
 			http_request_free(http_request, HTTP_FREE_BODY);
 			http_response_free(http_response, HTTP_FREE_BODY);
 		}

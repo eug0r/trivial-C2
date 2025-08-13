@@ -14,7 +14,7 @@
 int router(struct http_response *http_response, struct http_request *http_request) {
     char *method = http_request->req_line.method;
     char *path = http_request->req_line.origin;
-    if (strncmp(path, "/agents", 5) == 0) {
+    if (strncmp(path, "/agents", 7) == 0) {
         if (strcmp(method, "POST") == 0) {
             return post_agents(http_response, http_request);
         }
@@ -22,7 +22,7 @@ int router(struct http_response *http_response, struct http_request *http_reques
             return get_agents(http_response, http_request);
         }
     }
-    else if (strncmp(path, "/tasks", 5) == 0) {
+    else if (strncmp(path, "/tasks", 6) == 0) {
         if (strcmp(method, "POST") == 0) {
             return post_tasks(http_response, http_request);
         }
@@ -30,7 +30,7 @@ int router(struct http_response *http_response, struct http_request *http_reques
             return get_tasks(http_response, http_request);
         }
     }
-    else if (strncmp(path, "/results", 5) == 0) {
+    else if (strncmp(path, "/results", 8) == 0) {
         if (strcmp(method, "POST") == 0) {
             return post_results(http_response, http_request);
         }
@@ -931,7 +931,7 @@ int get_results(struct http_response *http_response, struct http_request *http_r
 
         } else if (agent_id_param && !task_id_param)
         {
-            sql = "SELECT * FROM tasks WHERE status = 1 AND agent_id = ?1;";
+            sql = "SELECT * FROM tasks WHERE status = 2 AND agent_id = ?1;";
 
             rc = sqlite3_prepare_v2(db_handle, sql, -1, &ppstmt, NULL);
             if (rc != SQLITE_OK) {
