@@ -4,6 +4,7 @@
 
 #include "http-parser.h"
 #define C2_DB_PATH "database.db"
+#define BUSY_TIMEOUT 10000
 int router(struct http_response *http_response, struct http_request *http_request);
 
 int bad_request(struct http_response *http_response);

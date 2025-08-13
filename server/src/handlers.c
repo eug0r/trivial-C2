@@ -142,7 +142,7 @@ int post_agents(struct http_response *http_response, struct http_request *http_r
     } else {
         fprintf(stderr, "Opened database successfully\n");
     }
-
+    sqlite3_busy_timeout(db_handle, BUSY_TIMEOUT);
     const char *sql = "INSERT INTO agents (uuid, hostname, handle) "  \
         "VALUES (?1, ?2, ?3); ";
     sqlite3_stmt *ppstmt;
@@ -222,6 +222,7 @@ int get_agents(struct http_response *http_response, struct http_request *http_re
     } else {
         fprintf(stderr, "Opened database successfully\n");
     }
+    sqlite3_busy_timeout(db_handle, BUSY_TIMEOUT);
 
     char *path = http_request->req_line.origin;
     char *sql;
@@ -443,6 +444,8 @@ int post_tasks(struct http_response *http_response, struct http_request *http_re
     } else {
         fprintf(stderr, "Opened database successfully\n");
     }
+    sqlite3_busy_timeout(db_handle, BUSY_TIMEOUT);
+
     const char *sql = "SELECT EXISTS(SELECT 1 FROM agents WHERE uuid = ?);";
     sqlite3_stmt *ppstmt1;
     int exists = 0;
@@ -598,6 +601,7 @@ int get_tasks(struct http_response *http_response, struct http_request *http_req
     } else {
         fprintf(stderr, "Opened database successfully\n");
     }
+    sqlite3_busy_timeout(db_handle, BUSY_TIMEOUT);
 
     const char *sql = "SELECT * FROM tasks "
     "WHERE agent_id = ?1 AND status = 0 "
@@ -644,7 +648,7 @@ int get_tasks(struct http_response *http_response, struct http_request *http_req
                     break;
                 case SQLITE_TEXT:
                     json_object_set_new(row_obj, col_name,
-                                        json_string((const char *)sqlite3_column_text(ppstmt, i)));
+                                    json_string((const char *)sqlite3_column_text(ppstmt, i)));
                     break;
                 case SQLITE_NULL:
                     json_object_set_new(row_obj, col_name, json_null());
@@ -809,6 +813,8 @@ int post_results(struct http_response *http_response, struct http_request *http_
     } else {
         fprintf(stderr, "Opened database successfully\n");
     }
+    sqlite3_busy_timeout(db_handle, BUSY_TIMEOUT);
+
     const char *sql = "UPDATE tasks "
     "SET result = ?1, status = 2 "
     "WHERE uuid = ?2 AND agent_id = ?3;";
@@ -876,6 +882,8 @@ int get_results(struct http_response *http_response, struct http_request *http_r
     } else {
         fprintf(stderr, "Opened database successfully\n");
     }
+    sqlite3_busy_timeout(db_handle, BUSY_TIMEOUT);
+
     char *path = http_request->req_line.origin;
     char *sql;
     sqlite3_stmt *ppstmt = NULL;
@@ -923,7 +931,7 @@ int get_results(struct http_response *http_response, struct http_request *http_r
 
         } else if (agent_id_param && !task_id_param)
         {
-            sql = "SELECT * FROM tasks WHERE is_done = 1 AND agent_id = ?1;";
+            sql = "SELECT * FROM tasks WHERE status = 1 AND agent_id = ?1;";
 
             rc = sqlite3_prepare_v2(db_handle, sql, -1, &ppstmt, NULL);
             if (rc != SQLITE_OK) {
