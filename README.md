@@ -1,4 +1,13 @@
-# Server:
+# Testing
+- start the server using the build-and-run.sh script
+- server listens to connection on port 4221, you may change it via HTTP_PORT_NO macro in server/http-server.c
+- build and run agent(s) on a supported system using build-and-run.sh, or build it with just-build.sh and run it on a supported system.
+- agent tries to connect to 127.0.0.1:4221, you may change it via the macros in agent/config.h
+- remove the `#define DEBUG` line from agent/config.h or add `#undef DEBUG` right below it to disable all logging to stdout and stderr.
+- start the control CLI using build-and-run.sh
+
+# Development
+## Server:
 compile and run: ./build-and-run.sh \
 __replace the vcpkg directory path with your own.__ \
 __to use the testing database, change `C2_DB_PATH` in src/handlers.h to testdatabase.db.__ \
