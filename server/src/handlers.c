@@ -14,12 +14,34 @@
 int router(struct http_response *http_response, struct http_request *http_request) {
     char *method = http_request->req_line.method;
     char *path = http_request->req_line.origin;
+    if (strcmp(path, "/") == 0) {
+        if (strcmp(method, "GET") == 0) {
+            return no_content_ok(http_response);
+        }
+        else {
+            return method_not_allowed(http_response);
+        }
+    }
     if (strncmp(path, "/agents", 7) == 0) {
         if (strcmp(method, "POST") == 0) {
             return post_agents(http_response, http_request);
         }
         else if (strcmp(method, "GET") == 0) {
             return get_agents(http_response, http_request);
+        }
+        else {
+            return method_not_allowed(http_response);
+        }
+    }
+    if (strncmp(path, "/agents", 7) == 0) {
+        if (strcmp(method, "POST") == 0) {
+            return post_agents(http_response, http_request);
+        }
+        else if (strcmp(method, "GET") == 0) {
+            return get_agents(http_response, http_request);
+        }
+        else {
+            return method_not_allowed(http_response);
         }
     }
     else if (strncmp(path, "/tasks", 6) == 0) {
@@ -29,6 +51,9 @@ int router(struct http_response *http_response, struct http_request *http_reques
         else if (strcmp(method, "GET") == 0) {
             return get_tasks(http_response, http_request);
         }
+        else {
+            return method_not_allowed(http_response);
+        }
     }
     else if (strncmp(path, "/results", 8) == 0) {
         if (strcmp(method, "POST") == 0) {
@@ -37,20 +62,35 @@ int router(struct http_response *http_response, struct http_request *http_reques
         else if (strcmp(method, "GET") == 0) {
             return get_results(http_response, http_request);
         }
+        else {
+            return method_not_allowed(http_response);
+        }
     }
     return not_found(http_response);
     //0 is the success code, 404 should probably be considered a 0, error codes are for crashes
 }
 
 //---util-functions---//
+int no_content_ok(struct http_response *http_response) {
+    http_response->stat_line.status_code = 200;
+    http_response->stat_line.reason = NULL;
+    http_response->content_length = 0;
+    return 0;
+}
+int method_not_allowed(struct http_response *http_response) {
+    http_response->stat_line.status_code = 405;
+    http_response->stat_line.reason = NULL;
+    http_response->content_length = 0;
+    return 0;
+}
 int not_found(struct http_response *http_response) {
-    http_response->stat_line.status_code = 404; //bad request
+    http_response->stat_line.status_code = 404;
     http_response->stat_line.reason = NULL;
     http_response->content_length = 0;
     return 0;
 }
 int bad_request(struct http_response *http_response) {
-    http_response->stat_line.status_code = 400; //bad request
+    http_response->stat_line.status_code = 400;
     http_response->stat_line.reason = NULL;
     http_response->content_length = 0;
     return 0;

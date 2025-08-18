@@ -50,7 +50,7 @@ json_t *task_conf(json_t *options) {
         }
         if (delay_ts.tv_sec < 0 || delay_ts.tv_nsec < 0
             || delay_ts.tv_nsec >= 1000000000L) {
-            return json_pack("{s:s, s:s}",
+            return json_pack("{s:s}",
                 "error", "no changes: delay out of range");
         }
     }
@@ -65,7 +65,7 @@ json_t *task_conf(json_t *options) {
         }
         if (jitter_ts.tv_sec < 0 || jitter_ts.tv_nsec < 0
                 || jitter_ts.tv_nsec >= 1000000000L) {
-            return json_pack("{s:s, s:s}",
+            return json_pack("{s:s}",
                 "error", "no changes: jitter out of range");
         }
     }

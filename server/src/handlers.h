@@ -7,6 +7,8 @@
 #define BUSY_TIMEOUT 10000
 int router(struct http_response *http_response, struct http_request *http_request);
 
+int no_content_ok(struct http_response *http_response);
+int method_not_allowed(struct http_response *http_response);
 int bad_request(struct http_response *http_response);
 int not_found(struct http_response *http_response);
 

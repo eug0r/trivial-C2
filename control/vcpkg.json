@@ -1,0 +1,8 @@
+{
+  "name": "trivial-c2",
+  "version": "0.1.0",
+  "dependencies": [
+    "jansson",
+    "curl"
+  ]
+}

@@ -11,7 +11,7 @@
 #include "hash-table.h"
 
 struct http_status_code_reason http_status_list[HTTP_STATUS_COVERED] =
-{
+{ //update the HTTP_STATUS_COVERED number when adding a new code
     {.code=100, .reason = "100 Continue"},
     {.code=200, .reason = "200 OK"},
     {.code=404, .reason = "404 Not Found"},
@@ -20,7 +20,8 @@ struct http_status_code_reason http_status_list[HTTP_STATUS_COVERED] =
     {.code=411, .reason = "411 Length Required"},
     {.code=413, .reason = "413 Content Too Large"},
     {.code=505, .reason = "505 HTTP Version Not Supported"},
-    {.code=415, .reason = "415 Unsupported Media Type"}
+    {.code=415, .reason = "415 Unsupported Media Type"},
+    {.code=405, .reason = "405 Method Not Allowed"},
 };
 
 struct http_request *http_request_reader(int client_fd, unsigned int *status_code, int *close_connection) {

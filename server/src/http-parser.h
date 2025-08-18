@@ -63,7 +63,7 @@ struct http_status_code_reason {
     unsigned int code;
     const char *reason;
 };
-#define HTTP_STATUS_COVERED 9
+#define HTTP_STATUS_COVERED 10
 extern struct http_status_code_reason http_status_list[HTTP_STATUS_COVERED];
 
 
