@@ -14,7 +14,7 @@
 #include "http-parser.h"
 
 #define CONNECTION_BACKLOG 20
-#define MAX_CLIENT_THREADS 10
+//#define MAX_CLIENT_THREADS 10
 #define HTTP_PORT_NO 4221
 //only persistent sequential HTTP/1.1 connection is supported. no pipelining or multiplexing
 //header keys are stored as lowercase

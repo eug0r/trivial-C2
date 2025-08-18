@@ -16,6 +16,7 @@
 #define SERVER_NAME_SIZE 256 //max size of <server-name/ip>:<port> and the null byte
 #define BUFSIZE 1024
 #define PROMPT_STR "c2-server$ "
+#define PROMPT_STR_LIST "c2-server/list$ "
 
 const int req_retries = 5;
 struct timespec req_wait = {
@@ -156,7 +157,7 @@ static inline void print_help(int menu_state) {
             printf("list: list agents\n");
             printf("\t-h [HANDLE]: list agent(s) with that handle\n");
             printf("results: see all completed tasks and their results\n");
-            printf("\t-o: redirect to an output file\n");
+            printf("\t-o: redirect to an output file (not implemented)\n");
             break;
         }
         case LIST_AGENT_SUBMENU: {
@@ -175,7 +176,7 @@ static inline void print_help(int menu_state) {
             printf("\tcmd [command]: issue the agent a shell command. "
                    "-q should come before the command.\n");
             printf("results: see all completed tasks of this agent and their results\n");
-            printf("\t-o: redirect to an output file\n");
+            printf("\t-o: redirect to an output file (not implemented)\n");
             printf("back: go to previous menu\n");
             break;
         }
@@ -301,7 +302,7 @@ int list_agents(CURL *curl, struct agent_info *agent, const char *agents_url) {
     char buf_array[BUFSIZE];
     char *buf = buf_array;
     while (1) {
-        printf("\n"PROMPT_STR);
+        printf("\n"PROMPT_STR_LIST);
         if (fgets(buf, BUFSIZE, stdin) == NULL) {
             json_decref(agents_arr);
             return -1;

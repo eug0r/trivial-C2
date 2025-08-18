@@ -643,11 +643,16 @@ int get_tasks(struct http_response *http_response, struct http_request *http_req
     }
     sqlite3_busy_timeout(db_handle, BUSY_TIMEOUT);
 
-    const char *sql = "SELECT * FROM tasks "
-    "WHERE agent_id = ?1 AND status = 0 "
-    "ORDER BY queue_no LIMIT 1; "; //could make limit
-    //a macro to return more than one tasks,
-    //after making sure the agent supports it
+    const char *sql = "WITH cte AS ( "
+    "  SELECT uuid FROM tasks "
+    "  WHERE agent_id = ?1 AND status = 0 "
+    "  ORDER BY queue_no "
+    "  LIMIT " TASK_RETRIEVE_COUNT
+    ") "
+    "UPDATE tasks "
+    "SET status = 1 "
+    "WHERE uuid IN (SELECT uuid FROM cte) "
+    "RETURNING *;";
     sqlite3_stmt *ppstmt = NULL;
     rc = sqlite3_prepare_v2(db_handle, sql, -1, &ppstmt, NULL);
     if (rc != SQLITE_OK) {
@@ -711,7 +716,7 @@ int get_tasks(struct http_response *http_response, struct http_request *http_req
         return -1;
     }
     sqlite3_finalize(ppstmt);
-    //sqlite3_close(db_handle);
+    sqlite3_close(db_handle);
 
     http_response->stat_line.status_code = 200;
     http_response->stat_line.reason = NULL;
@@ -748,27 +753,27 @@ int get_tasks(struct http_response *http_response, struct http_request *http_req
     //success
     json_decref(response_root);
 
-    //update tasks to pending
-    const char *sql2 = "UPDATE tasks "
-    "SET status = 1 " //pending task
-    "WHERE agent_id = ?1 AND status = 0; ";
-    sqlite3_stmt *ppstmt2;
-    rc = sqlite3_prepare_v2(db_handle, sql2, -1, &ppstmt2, NULL);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db_handle));
-        sqlite3_close(db_handle);
-        return -1;
-    }
-    sqlite3_bind_text(ppstmt2, 1, agent_id_param, -1, SQLITE_STATIC);
-    rc = sqlite3_step(ppstmt2);
-    if (rc != SQLITE_DONE) {
-        fprintf(stderr, "error: %s\n", sqlite3_errmsg(db_handle));
-        sqlite3_finalize(ppstmt2);
-        sqlite3_close(db_handle);
-        return -1;
-    }
-    sqlite3_finalize(ppstmt2);
-    sqlite3_close(db_handle);
+    // //update tasks to pending
+    // const char *sql2 = "UPDATE tasks "
+    // "SET status = 1 " //pending task
+    // "WHERE agent_id = ?1 AND status = 0; ";
+    // sqlite3_stmt *ppstmt2;
+    // rc = sqlite3_prepare_v2(db_handle, sql2, -1, &ppstmt2, NULL);
+    // if (rc != SQLITE_OK) {
+    //     fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db_handle));
+    //     sqlite3_close(db_handle);
+    //     return -1;
+    // }
+    // sqlite3_bind_text(ppstmt2, 1, agent_id_param, -1, SQLITE_STATIC);
+    // rc = sqlite3_step(ppstmt2);
+    // if (rc != SQLITE_DONE) {
+    //     fprintf(stderr, "error: %s\n", sqlite3_errmsg(db_handle));
+    //     sqlite3_finalize(ppstmt2);
+    //     sqlite3_close(db_handle);
+    //     return -1;
+    // }
+    // sqlite3_finalize(ppstmt2);
+    // sqlite3_close(db_handle)
     return 0;
 }
 

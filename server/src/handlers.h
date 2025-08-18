@@ -5,6 +5,7 @@
 #include "http-parser.h"
 #define C2_DB_PATH "database.db"
 #define BUSY_TIMEOUT 10000
+#define TASK_RETRIEVE_COUNT "3"
 int router(struct http_response *http_response, struct http_request *http_request);
 
 int no_content_ok(struct http_response *http_response);
