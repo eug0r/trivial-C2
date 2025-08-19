@@ -7,8 +7,7 @@ set -e # Exit early if any commands fail
   # cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=<PATH-TO-VCPKG>/scripts/buildsystems/vcpkg.cmake
   cmake -B build -S . \
     -DCMAKE_TOOLCHAIN_FILE=/home/$USER/.vcpkg/scripts/buildsystems/vcpkg.cmake \
-    -DVCPKG_TARGET_TRIPLET=x64-linux \
-  #
+    -DVCPKG_TARGET_TRIPLET=x64-linux
   cmake --build ./build
 )
 

@@ -404,9 +404,10 @@ ssize_t http_response_sender(int client_fd, struct http_response *http_response,
     const char *version_str = "HTTP/1.1 "; //leave the SP here
     // adding it to the msg
     cur_len = strlen(version_str);
-    #define HTTP_RESPONSE_BUF_REALLOC(void) do{ \
+    #define HTTP_RESPONSE_BUF_REALLOC() do{ \
         if (bufsiz <= msg_len + cur_len) { \
-            bufsiz *= 2; \
+            while(bufsiz <= msg_len + cur_len) \
+                bufsiz *= 2; \
             char *temp_ptr = realloc(msg_buf, bufsiz); \
             if (temp_ptr == NULL) { \
                 free(msg_buf); \
@@ -415,7 +416,7 @@ ssize_t http_response_sender(int client_fd, struct http_response *http_response,
             msg_buf = temp_ptr; \
         } \
     } while(0) //wrap this boilerplate up, I don't know if this is bad practice
-    HTTP_RESPONSE_BUF_REALLOC(void);
+    HTTP_RESPONSE_BUF_REALLOC();
     snprintf(msg_buf + msg_len, bufsiz - msg_len, "%s", version_str);
     msg_len += cur_len; //done adding
 
