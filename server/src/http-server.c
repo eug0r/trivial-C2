@@ -10,27 +10,90 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include "hash-table.h"
 #include "http-parser.h"
 
 #define CONNECTION_BACKLOG 20
-//#define MAX_CLIENT_THREADS 10
+#define THREAD_POOL_SIZE 20
 #define HTTP_PORT_NO 4221
 //only persistent sequential HTTP/1.1 connection is supported. no pipelining or multiplexing
 //header keys are stored as lowercase
 //need to add thread pool
 
-void *client_routine(void *args);
-
-struct cli_routine_args {
+struct client_args {
 	int client_fd;
 	int (*router_fn)(struct http_response *, struct http_request *);
 };
+struct task_node {
+	struct client_args *args;
+	struct task_node *next;
+};
+
+pthread_mutex_t task_queue_mutex;
+pthread_cond_t task_queue_cond;
+
+volatile sig_atomic_t shutdown_flag = 0;
+
+struct task_node *head = NULL;
+struct task_node *tail = NULL;
+int enqueue_task(struct client_args *args);
+struct client_args *dequeue_task(void);
+void *worker_routine(void *args);
+int handle_client(struct client_args *c_args);
+
+
+void *control_routine(void *args) {
+	char buf[16];
+	while (fgets(buf, sizeof(buf), stdin)) { //later version listen on a different port
+		if (strncmp(buf, "quit", 4) == 0) {
+			shutdown_flag = 1;
+			pthread_mutex_lock(&task_queue_mutex);
+			pthread_cond_broadcast(&task_queue_cond);
+			pthread_mutex_unlock(&task_queue_mutex);
+			break;
+		}
+	}
+	return NULL;
+}
+
+void handle_signal(int sig) {
+	shutdown_flag = 1;
+	signal(sig, SIG_IGN); //ignore further signals
+}
 
 int http_init_server(int (*router)(struct http_response *, struct http_request *)) {
-	// Disable output buffering
+	//disable output buffering
 	setbuf(stdout, NULL);
  	setbuf(stderr, NULL);
+
+	//register signal handlers
+	struct sigaction sa = {0};
+	sa.sa_handler = handle_signal;
+	sigemptyset(&sa.sa_mask); //check this
+	sa.sa_flags = 0; //we want accept to break with EINTR
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
+
+	//create worker threads
+	pthread_t worker_pool[THREAD_POOL_SIZE];
+	pthread_mutex_init(&task_queue_mutex, NULL);
+	pthread_cond_init(&task_queue_cond, NULL);
+
+	for (int i = 0; i < THREAD_POOL_SIZE; i++) {
+		if (pthread_create(&worker_pool[i], NULL, &worker_routine, NULL) != 0) {
+			perror("Failed to create thread");
+			return 1;
+		}
+	}
+
+	//create control thread to handle exit
+	pthread_t control_thread;
+	if (pthread_create(&control_thread, NULL, &control_routine, NULL) != 0) {
+		perror("Failed to create thread");
+		return 1;
+	}
+
 
 	int server_fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (server_fd == -1) {
@@ -62,50 +125,98 @@ int http_init_server(int (*router)(struct http_response *, struct http_request *
 
 	printf("Waiting for a client to connect...\n");
 
-	//pthread_t client_threads[MAX_CLIENT_THREADS]; // unlimited for now
 
-	for (size_t i = 0;;i++) {
+	while (shutdown_flag == 0) {
 		struct sockaddr_in cli_addr;
 		socklen_t cli_len = sizeof(cli_addr);
 		int client_fd = accept(server_fd, (struct sockaddr *)&cli_addr, &cli_len);
 		if (client_fd == -1) {
-			fprintf(stderr, "accept no %zu failed: %s\n", i, strerror(errno));
-			continue;
+			if (shutdown_flag) {
+				fprintf(stderr, "accept got interrupted by signal: %s\n", strerror(errno));
+				pthread_mutex_lock(&task_queue_mutex);
+				pthread_cond_broadcast(&task_queue_cond);
+				pthread_mutex_unlock(&task_queue_mutex);
+				break;
+			} //accept got interrupted by signal
+			//accept failed normally:
+			fprintf(stderr, "accept failed: %s\n", strerror(errno));
+			continue; //break
 		} //client connected
 		char ip_addr_pres[INET_ADDRSTRLEN];
 		inet_ntop(AF_INET, &cli_addr.sin_addr, ip_addr_pres, sizeof(ip_addr_pres));
 		printf("server: got connection from %s\n", ip_addr_pres);
-		pthread_t client_th;
 
-		struct cli_routine_args *ptr = malloc(sizeof(struct cli_routine_args));
-		if (ptr == NULL) {
+		struct client_args *c_args = malloc(sizeof(struct client_args));
+		if (c_args == NULL) {
 			perror("malloc");
 			close(client_fd);
-			continue;
+			shutdown_flag = 1;
+			pthread_mutex_lock(&task_queue_mutex);
+			pthread_cond_broadcast(&task_queue_cond);
+			pthread_mutex_unlock(&task_queue_mutex);
+			break;
 		}
-		ptr->client_fd = client_fd;
-		ptr->router_fn = router;
-		int ret = pthread_create(&client_th, NULL, client_routine, ptr);
-		if (ret) {
-			fprintf(stderr, "pthread_create(id[%zu]): %s\n", i, strerror(ret));
-			free(ptr);
-			return 1; //graceful exiting needed
-		}
-		printf("thread %zu created.\n", i);
-		pthread_detach(client_th);
-	}
-	//if joining threads do it here
+		c_args->client_fd = client_fd;
+		c_args->router_fn = router;
 
-	close(server_fd); //need to listen for commands to break the loop and run this
-	//create a back-channel thread on another port
-	//that you can connect to and send the termination command or something
+		pthread_mutex_lock(&task_queue_mutex);
+		if (enqueue_task(c_args) == -1) {
+			shutdown_flag = 1;
+			pthread_cond_broadcast(&task_queue_cond);
+			pthread_mutex_unlock(&task_queue_mutex);
+			free(c_args);
+			close(client_fd);
+			break;
+		} //added new tasks
+		pthread_cond_signal(&task_queue_cond);
+		pthread_mutex_unlock(&task_queue_mutex);
+		printf("connection task enqueued\n");
+	}
+
+	pthread_cancel(control_thread);
+	pthread_join(control_thread, NULL);
+
+	for (int i = 0; i < THREAD_POOL_SIZE; i++) {
+		if (pthread_join(worker_pool[i], NULL) != 0) {
+			perror("Failed to join the thread");
+			return 1;
+		}
+	}
+
+	pthread_mutex_destroy(&task_queue_mutex);
+	pthread_cond_destroy(&task_queue_cond);
+	close(server_fd);
 	return 0;
 }
 
-void *client_routine(void *args) {
-	int client_fd = ((struct cli_routine_args*)args)->client_fd;
-	int (*router_fn)(struct http_response *, struct http_request *) = ((struct cli_routine_args*)args)->router_fn;
-	free(args);
+void *worker_routine(void *args) {
+	while (1) {
+		pthread_mutex_lock(&task_queue_mutex);
+		struct client_args *c_args = NULL;
+		while (shutdown_flag == 0 && ((c_args = dequeue_task()) == NULL)) {
+			pthread_cond_wait(&task_queue_cond, &task_queue_mutex);
+		} //got task or shutdown was set
+		if (shutdown_flag == 1) {
+			pthread_mutex_unlock(&task_queue_mutex);
+			break;  //exit
+		}
+		pthread_mutex_unlock(&task_queue_mutex);
+		int rc = handle_client(c_args); //handle_client frees c_args
+		free(c_args);
+		if (rc == -1) { //hardcore error
+			shutdown_flag = 1;
+			pthread_cond_broadcast(&task_queue_cond);
+			break;
+		}
+	}
+	return NULL;
+}
+
+int handle_client(struct client_args *c_args) {
+	if (!c_args)
+		return -1;
+	int client_fd = c_args->client_fd;
+	int (*router_fn)(struct http_response *, struct http_request *) = c_args->router_fn;
 
 	int close_connection = 0;
 	while (!close_connection) {
@@ -113,18 +224,17 @@ void *client_routine(void *args) {
 		if (http_response == NULL) {
 			fprintf(stderr, "failed to allocate.\n");
 			close(client_fd);
-			return NULL; //not sure about the return codes
+			return -1; //not sure about the return codes
 		}
 		http_response->stat_line.status_code = 0;
 		struct http_request *http_request = http_request_reader(client_fd, &http_response->stat_line.status_code, &close_connection);
-
 		if (http_request == NULL) {
 			if (http_response->stat_line.status_code == 0) {
 				if (close_connection == 1) {
 					break; //connection closed by the client
 				}
 				close(client_fd);
-				return NULL; //failed to allocate before even reading
+				return -1; //failed to allocate before even reading
 			}
 			else {
 				//send() proper http response for the error status code.
@@ -159,7 +269,7 @@ void *client_routine(void *args) {
 				if (http_response == NULL) {
 					fprintf(stderr, "failed to allocate.\n");
 					close(client_fd);
-					return NULL; //not sure about the return codes
+					return -1; //not sure about the return codes
 				}
 				http_response->stat_line.status_code = 500; //internal server error
 				size_t bytes_sent = http_response_sender(client_fd, http_response, close_connection);
@@ -170,6 +280,36 @@ void *client_routine(void *args) {
 		}
 	}
 	close(client_fd);
-	//malloc copy result
-	return NULL; //return (void *)&result //in case we join the threads and collect their returns value
+	return 0; // connection was terminated "safely" though the handlers don't distinguish between
+	// malloc error or less important ones, and return -1 in either case, so those won't be caught
+}
+
+
+int enqueue_task(struct client_args *args) {
+	struct task_node *new = malloc(sizeof(struct task_node));
+	if (new == NULL) {
+		perror("malloc");
+		return -1;
+	}
+	new->args = args;
+	new->next = (void *)NULL;
+	if (tail == NULL)
+		head = new;
+	else
+		(tail)->next = new;
+	tail = new;
+	return 0;
+}
+struct client_args *dequeue_task(void) {
+	if (head == NULL)
+		return (void *)NULL;
+	else {
+		struct client_args *args = head->args;
+		struct task_node *temp = head;
+		head = head->next;
+		if (head == NULL)
+			tail = (void *)NULL;
+		free(temp);
+		return args;
+	}
 }
