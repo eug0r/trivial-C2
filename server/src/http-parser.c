@@ -4,11 +4,14 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <sys/socket.h>
+#include <signal.h>
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <ctype.h>
 #include "hash-table.h"
+
+extern volatile sig_atomic_t shutdown_flag; //needs to be checked in all I/O calls
 
 struct http_status_code_reason http_status_list[HTTP_STATUS_COVERED] =
 { //update the HTTP_STATUS_COVERED number when adding a new code
@@ -26,6 +29,9 @@ struct http_status_code_reason http_status_list[HTTP_STATUS_COVERED] =
 
 struct http_request *http_request_reader(int client_fd, unsigned int *status_code, int *close_connection) {
     struct http_request *http_request = calloc(1, sizeof(struct http_request));
+    // struct http_request *http_request = malloc(sizeof(struct http_request));
+    // memset(http_request, 0, sizeof(struct http_request));
+
     if (http_request == NULL) {
         fprintf(stderr, "failed to allocate.\n");
         return NULL; //if status_code not set and returned NULL, request isn't even read.
@@ -38,6 +44,17 @@ struct http_request *http_request_reader(int client_fd, unsigned int *status_cod
         bytes_recvd = recv(client_fd, buf+bytes_total, BUFSIZ-bytes_total, 0);
 
         if (bytes_recvd < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                //timeout
+                if (shutdown_flag) {
+                    fprintf(stderr, "shutdown flag caught during recv timeout\n");
+                    http_request_free(http_request, HTTP_FREE_STRCT);
+                    return NULL;
+                }
+                //no shutdown
+                continue;
+            }
+            //other errors
             fprintf(stderr,"error reading from socket: %s\n", strerror(errno));
             *status_code = 500; //internal server error
             http_request_free(http_request, HTTP_FREE_STRCT);
@@ -46,6 +63,7 @@ struct http_request *http_request_reader(int client_fd, unsigned int *status_cod
         if (bytes_recvd == 0) {
             if (is_first_iter) {
                 *close_connection = 1;
+                http_request_free(http_request, HTTP_FREE_STRCT);
                 return NULL;
             }
             fprintf(stderr, "client didn't complete request.\n");
@@ -76,19 +94,12 @@ struct http_request *http_request_reader(int client_fd, unsigned int *status_cod
         is_first_iter = 0;
     }
     // do request line processing here.
-    //just to pass
-    // if (strcmp(http_request.req_line.origin, "/")== 0) {
-    //     const char *msg = "HTTP/1.1 200 OK\r\n\r\n";
-    //     send(client_fd, msg, strlen(msg), 0);
-    // } else if (strcmp(http_request.req_line.origin, "/") != 0) {
-    //     const char *msg = "HTTP/1.1 404 Not Found\r\n\r\n";
-    //     send(client_fd, msg, strlen(msg), 0);
-    // }
+
     while (true) {
         ssize_t bytes_parsed = parse_headers(buf, bytes_total, &http_request->headers, status_code);
         if (bytes_parsed == -1) {
             fprintf(stderr, "invalid header section.\n");
-            *status_code = 400;
+            //*status_code = 400;
             http_request_free(http_request, HTTP_FREE_REQL);
             return NULL; //status code is already set up.
         }
@@ -104,9 +115,19 @@ struct http_request *http_request_reader(int client_fd, unsigned int *status_cod
             break; //goto body
         }
         //no headers section yet (\r\n\r\n) waiting for more bytes:
+continue_recv: //for recovering from timeout
         bytes_recvd = recv(client_fd, buf+bytes_total, BUFSIZ-bytes_total, 0);
-
         if (bytes_recvd < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                //timeout
+                if (shutdown_flag) {
+                    fprintf(stderr, "shutdown flag caught during recv timeout\n");
+                    http_request_free(http_request, HTTP_FREE_REQL);
+                    return NULL;
+                }
+                //no shutdown
+                goto continue_recv;
+            }
             fprintf(stderr,"error reading from socket: %s\n", strerror(errno));
             *status_code = 500;
             http_request_free(http_request, HTTP_FREE_REQL);
@@ -122,7 +143,7 @@ struct http_request *http_request_reader(int client_fd, unsigned int *status_cod
         bytes_total+=bytes_recvd;
     }
 
-    //do headers processing here. check Content-length if not GET or other bodyless methods
+    //do headers processing here. check Content-length if not GET or other body-less methods
     struct_header *connection = hash_lookup_node(http_request->headers, "connection");
     if (connection == NULL) {
         *close_connection = 0; //persistent by default
@@ -158,7 +179,7 @@ struct http_request *http_request_reader(int client_fd, unsigned int *status_cod
         //and add max_content_length
     } //length is valid, reading body:
 
-    char *body_buf = malloc(length);
+    char *body_buf = malloc(length); //free this
     if (!body_buf) {
         fprintf(stderr, "malloc failed: %s\n", strerror(errno));
         *status_code = 500;
@@ -174,8 +195,19 @@ struct http_request *http_request_reader(int client_fd, unsigned int *status_cod
         while (true) {
             bytes_recvd = recv(client_fd, body_buf+bytes_total, length-bytes_total, 0);
             if (bytes_recvd < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    //timeout
+                    if (shutdown_flag) {
+                        fprintf(stderr, "shutdown flag caught during recv timeout\n");
+                        free(body_buf);
+                        http_request_free(http_request, HTTP_FREE_HDRS);
+                        return NULL;
+                    }
+                    //no shutdown
+                    continue;
+                }
                 fprintf(stderr,"error reading from socket: %s\n", strerror(errno));
-                *status_code = 500; //free bodybuf
+                *status_code = 500;
                 free(body_buf);
                 http_request_free(http_request, HTTP_FREE_HDRS);
                 return NULL;
@@ -188,6 +220,7 @@ struct http_request *http_request_reader(int client_fd, unsigned int *status_cod
             if (bytes_recvd == 0) {
                 fprintf(stderr, "client didn't complete request.\n");
                 *status_code = 400;
+                free(body_buf);
                 http_request_free(http_request, HTTP_FREE_HDRS);
                 return NULL;
             }
@@ -240,7 +273,6 @@ ssize_t parse_request_line(char *buf_start, size_t size, struct request_line *re
                 *status_code = 500;
                 free(req_line->method);
                 free(req_line->origin);
-                free(req_line->version);
                 return -1;
             }
             return i+2; //skip the CRLF
@@ -391,6 +423,9 @@ void http_response_free(struct http_response *http_response, int mode) {
 
 }
 
+
+ssize_t send_all(int sockfd, const void *buf, size_t len, int flags); //helper for send
+
 ssize_t http_response_sender(int client_fd, struct http_response *http_response, int close_connection) {
     //initialize the struct to zero before filling with data and passing here
     size_t bufsiz = BUFSIZ;
@@ -420,7 +455,7 @@ ssize_t http_response_sender(int client_fd, struct http_response *http_response,
     snprintf(msg_buf + msg_len, bufsiz - msg_len, "%s", version_str);
     msg_len += cur_len; //done adding
 
-    if (http_response->stat_line.reason == NULL) {
+    if (http_response->stat_line.reason == NULL) { //reason is left empty by the backend handlers
         for (int i = 0; i < HTTP_STATUS_COVERED; i++) {
             if (http_response->stat_line.status_code == http_status_list[i].code) {
                 http_response->stat_line.reason = strdup(http_status_list[i].reason);
@@ -477,8 +512,42 @@ ssize_t http_response_sender(int client_fd, struct http_response *http_response,
         msg_len += cur_len; //this never included the trailing null-term and neither should the memcpy
     }
 
-    ssize_t bytes_sent = send(client_fd, msg_buf, msg_len, 0);
+    ssize_t bytes_sent = send_all(client_fd, msg_buf, msg_len, 0);
     free(msg_buf); //response struct will be free'd by the caller
     return bytes_sent;
 }
 
+ssize_t send_all(int sockfd, const void *buf, size_t len, int flags) {
+    ssize_t total_sent = 0;
+    const char *p = buf;
+    while (total_sent < len) {
+        ssize_t n = send(sockfd, p + total_sent, len - total_sent, flags);
+        if (n < 0) {
+            if (errno == EINTR) {
+                if (shutdown_flag) {
+                    fprintf(stderr, "shutdown flag caught after send got interrupted\n");
+                    return -1;
+                }
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                //timeout
+                if (shutdown_flag) {
+                    fprintf(stderr, "shutdown flag caught during send timeout\n");
+                    return -1;
+                }
+                continue;
+            }
+            fprintf(stderr, "error sending: %s\n", strerror(errno));
+            return -1;
+        }
+        if (n == 0) {
+            //socket closed unexpectedly
+            fprintf(stderr, "send returned 0 (client closed connection?)\n");
+            return total_sent;
+        }
+        //positive n:
+        total_sent += n;
+    }
+    return total_sent;
+}

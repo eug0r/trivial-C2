@@ -854,6 +854,7 @@ int post_results(struct http_response *http_response, struct http_request *http_
     if(rc) {
         fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(db_handle));
         json_decref(root);
+        free(result_str);
         return -1;
     } else {
         fprintf(stderr, "Opened database successfully\n");
@@ -869,6 +870,7 @@ int post_results(struct http_response *http_response, struct http_request *http_
         fprintf(stderr, "SQL error: %s\n", sqlite3_errmsg(db_handle));
         sqlite3_close(db_handle);
         json_decref(root);
+        free(result_str);
         return -1;
     }
     sqlite3_bind_text(ppstmt, 1, result_str, -1, SQLITE_STATIC);
@@ -880,9 +882,11 @@ int post_results(struct http_response *http_response, struct http_request *http_
         sqlite3_finalize(ppstmt);
         sqlite3_close(db_handle);
         json_decref(root);
+        free(result_str);
         return -1;
     } //no errors:
     sqlite3_finalize(ppstmt);
+    free(result_str);
 
     int rows_affected = sqlite3_changes(db_handle);
     if (rows_affected == 0) {
