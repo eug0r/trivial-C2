@@ -18,6 +18,7 @@
 #define FILENAME_SIZE 256 // '\0' included
 #define PROMPT_STR "c2-server$ "
 #define PROMPT_STR_LIST "c2-server/list$ "
+#define SERVER_CERT_PATH "../certs/server-cert.pem"
 
 const int req_retries = 5;
 struct timespec req_wait = {
@@ -66,6 +67,7 @@ int main(void){
     CURLcode rc_curl;
     char *base_url;
     CURL *curl = curl_easy_init();
+
     if (!curl) {
         exit(EXIT_FAILURE);
     }
@@ -113,15 +115,17 @@ char *server_connect(CURL *curl) {
     long http_code;
     printf("enter <server-name/IP>:<port-no> to connect: ");
     char buf[SERVER_NAME_SIZE];
-    char *url = malloc(SERVER_NAME_SIZE + 16); /* extra space for http:/// */
+    char *url = malloc(SERVER_NAME_SIZE + 16); /* extra space for https:/// */
     if (!url) {
         perror("malloc");
         return (void *)NULL;
     }
     fgets(buf, sizeof(buf), stdin);
     buf[strcspn(buf, "\n")] = '\0';
-    sprintf(url,"http://%s/", buf);
+    sprintf(url,"https://%s/", buf);
     curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_CAINFO, SERVER_CERT_PATH);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1);
     curl_easy_setopt(curl, CURLOPT_HTTPGET, 1);
     struct response_buf response_buf = {0};
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &write_cb);
@@ -267,6 +271,8 @@ int list_agents(CURL *curl, struct agent_info *agent, const char *agents_url) {
     CURLcode rc_curl;
     long http_code;
     curl_easy_setopt(curl, CURLOPT_URL, agents_url);
+    curl_easy_setopt(curl, CURLOPT_CAINFO, SERVER_CERT_PATH);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1);
     curl_easy_setopt(curl, CURLOPT_HTTPGET, 1);
     struct response_buf response_buf = {0};
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &write_cb);
@@ -478,6 +484,8 @@ int ping_task(CURL *curl, struct agent_info *agent, const char *base_url, char *
     }
     sprintf(tasks_url, "%stasks",base_url);
     curl_easy_setopt(curl, CURLOPT_URL, tasks_url);
+    curl_easy_setopt(curl, CURLOPT_CAINFO, SERVER_CERT_PATH);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1);
     curl_easy_setopt(curl, CURLOPT_POST, 1);
     struct response_buf response_buf = {0};
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &write_cb);
@@ -655,6 +663,8 @@ int conf_task(CURL *curl, struct agent_info *agent, const char *base_url, char *
     }
     sprintf(tasks_url, "%stasks",base_url);
     curl_easy_setopt(curl, CURLOPT_URL, tasks_url);
+    curl_easy_setopt(curl, CURLOPT_CAINFO, SERVER_CERT_PATH);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1);
     curl_easy_setopt(curl, CURLOPT_POST, 1);
     struct response_buf response_buf = {0};
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &write_cb);
@@ -782,6 +792,8 @@ int cmd_task(CURL *curl, struct agent_info *agent, const char *base_url, char *s
     }
     sprintf(tasks_url, "%stasks",base_url);
     curl_easy_setopt(curl, CURLOPT_URL, tasks_url);
+    curl_easy_setopt(curl, CURLOPT_CAINFO, SERVER_CERT_PATH);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1);
     curl_easy_setopt(curl, CURLOPT_POST, 1);
     struct response_buf response_buf = {0};
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &write_cb);
@@ -860,6 +872,8 @@ int print_results(CURL *curl, char *filename, const char *base_url, char *agent_
         sprintf(results_url, "%sresults", base_url);
     }
     curl_easy_setopt(curl, CURLOPT_URL, results_url);
+    curl_easy_setopt(curl, CURLOPT_CAINFO, SERVER_CERT_PATH);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1);
     curl_easy_setopt(curl, CURLOPT_HTTPGET, 1);
     struct response_buf response_buf = {0};
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &write_cb);

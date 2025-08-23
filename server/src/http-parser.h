@@ -2,6 +2,8 @@
 #define HTTP_PARSER_H
 
 #include <stdlib.h>
+#include <openssl/ssl.h>
+//#include "hash-table.h"
 
 typedef struct ht_node struct_header;
 
@@ -45,8 +47,8 @@ struct http_request {
     char *body;
 };
 
-struct http_request *http_request_reader(int client_fd, unsigned int *status_code, int *close_connection);
-ssize_t http_response_sender(int client_fd, struct http_response *http_response, int close_connection);
+struct http_request *http_request_reader(SSL *ssl, unsigned int *status_code, int *close_connection);
+int http_response_sender(SSL *ssl, struct http_response *http_response, int close_connection, size_t *bytes_sent);
 
 ssize_t parse_request_line(char *buf_start, size_t size, struct request_line *req_line, unsigned int *status_code);
 ssize_t parse_headers(char *buf_start, size_t size, struct_header ***headers_ptr, unsigned int *status_code);

@@ -58,3 +58,7 @@ cmake-build-debug/
 jansson.h
 sqlite3.h
 database.db
+server-priv.pem
+server-private.pem
+privkey.pem
+server.key

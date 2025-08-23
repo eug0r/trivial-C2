@@ -10,6 +10,8 @@
 #include <errno.h>
 #include <ctype.h>
 #include "hash-table.h"
+#include "openssl/ssl.h"
+#include "openssl/err.h"
 
 extern volatile sig_atomic_t shutdown_flag; //needs to be checked in all I/O calls
 
@@ -27,7 +29,101 @@ struct http_status_code_reason http_status_list[HTTP_STATUS_COVERED] =
     {.code=405, .reason = "405 Method Not Allowed"},
 };
 
-struct http_request *http_request_reader(int client_fd, unsigned int *status_code, int *close_connection) {
+enum http_ssl_rc {
+    HTTP_SSL_OK,
+    HTTP_SSL_CLOSED,
+    HTTP_SSL_SD_DETECT, //shutdown flag
+    HTTP_SSL_THISCONN_ERR,
+    HTTP_SSL_FATAL_ERR //unused so far
+};
+enum http_ssl_io_fn {
+    HTTP_SSL_READ,
+    HTTP_SSL_WRITE
+};
+
+static enum http_ssl_rc http_ssl_io_helper(enum http_ssl_io_fn fn, SSL *ssl, void *buf, size_t num, size_t *bytes_processed) {
+    int rc;
+    while (1) {
+        switch (fn) {
+            case HTTP_SSL_READ: {
+                rc = SSL_read_ex(ssl, buf, num, bytes_processed);
+                break;
+            }
+            case HTTP_SSL_WRITE: {
+                rc = SSL_write_ex(ssl, buf, num, bytes_processed);
+                break;
+            }
+            default:
+                return HTTP_SSL_THISCONN_ERR; //shouldn't happen if enum type is passed
+        }
+        if (rc > 0)
+            return HTTP_SSL_OK;
+        //rc <= 0; error
+        int err = SSL_get_error(ssl, rc);
+        switch (err) {
+            case SSL_ERROR_WANT_READ:
+            case SSL_ERROR_WANT_WRITE:
+                //timeout triggers this
+                //fprintf(stderr, "timeout\n");
+                if (shutdown_flag) {
+                    fprintf(stderr, "shutdown flag caught during ssl IO WANT_*.\n");
+                    return HTTP_SSL_SD_DETECT;
+                }
+                continue;
+            case SSL_ERROR_ZERO_RETURN:
+                fprintf(stderr, "ssl IO: peer sent shutdown.\n");
+                //SSL_shutdown(ssl); sending this on response
+                return HTTP_SSL_CLOSED;
+            case SSL_ERROR_SYSCALL:
+                if (errno == EAGAIN || errno == EWOULDBLOCK) { //this is how
+                    //some people on stackoverflow and github mentioned they would check
+                    //for timeout on a blocking socket, but maybe it's legacy, because
+                    //when i tested, timeout returns SSL_ERROR_WANT_* , not SSL_ERROR_SYSCALL
+                    //fprintf(stderr, "ssl IO timeout\n");
+                    if (shutdown_flag) {
+                        fprintf(stderr, "shutdown flag caught during ssl IO timeout.\n");
+                        SSL_shutdown(ssl);
+                        return HTTP_SSL_SD_DETECT;
+                    } //retrying after timeout
+                    continue;
+                }
+                if (errno == EINTR) {
+                    if (shutdown_flag) {
+                        fprintf(stderr, "Shutdown flag caught during ssl IO signal interrupt.\n");
+                        SSL_shutdown(ssl);
+                        return HTTP_SSL_SD_DETECT;
+                    } //retrying
+                    continue;
+                }
+                if (errno == EPIPE || errno == ECONNRESET) {
+                    fprintf(stderr, "ssl IO syscall error: %s\n", strerror(errno));
+                    return HTTP_SSL_THISCONN_ERR;
+                }
+                if (errno == 0) {
+                    fprintf(stderr, "ssl IO syscall error: peer closed socket without notice.\n");
+                    //SSL_shutdown(ssl); sending this on response part
+                    return HTTP_SSL_CLOSED;
+                }//syscall error:
+                fprintf(stderr, "ssl IO syscall error: %s\n", strerror(errno));
+                return HTTP_SSL_THISCONN_ERR;
+            case SSL_ERROR_SSL:
+                fprintf(stderr, "ssl IO protocol error.\n");
+                unsigned long e;
+                while ((e = ERR_get_error())) {
+                    char errbuf[256];
+                    ERR_error_string_n(e, errbuf, sizeof(errbuf));
+                    fprintf(stderr, "openssl error: %s\n", errbuf);
+                }
+                return HTTP_SSL_THISCONN_ERR;
+            default:
+                fprintf(stderr, "ssl IO other error: %d\n", err);
+                SSL_shutdown(ssl);
+                return HTTP_SSL_THISCONN_ERR;
+        }
+    }
+}
+
+struct http_request *http_request_reader(SSL *ssl, unsigned int *status_code, int *close_connection) {
     struct http_request *http_request = calloc(1, sizeof(struct http_request));
     // struct http_request *http_request = malloc(sizeof(struct http_request));
     // memset(http_request, 0, sizeof(struct http_request));
@@ -37,41 +133,45 @@ struct http_request *http_request_reader(int client_fd, unsigned int *status_cod
         return NULL; //if status_code not set and returned NULL, request isn't even read.
     }
     char buf[BUFSIZ];
-    ssize_t bytes_total = 0, bytes_recvd;
+    size_t bytes_total = 0, bytes_recvd;
 
-    int is_first_iter = 1;
-    while (true) {
-        bytes_recvd = recv(client_fd, buf+bytes_total, BUFSIZ-bytes_total, 0);
-
-        if (bytes_recvd < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                //timeout
-                if (shutdown_flag) {
-                    fprintf(stderr, "shutdown flag caught during recv timeout\n");
-                    http_request_free(http_request, HTTP_FREE_STRCT);
-                    return NULL;
-                }
-                //no shutdown
-                continue;
-            }
-            //other errors
-            fprintf(stderr,"error reading from socket: %s\n", strerror(errno));
-            *status_code = 500; //internal server error
-            http_request_free(http_request, HTTP_FREE_STRCT);
-            return NULL;
-        }
-        if (bytes_recvd == 0) {
-            if (is_first_iter) {
-                *close_connection = 1;
+    //int is_first_iter = 1;
+    while (1) {
+        //bytes_recvd = recv(client_fd, buf+bytes_total, BUFSIZ-bytes_total, 0);
+        enum http_ssl_rc rc = http_ssl_io_helper(HTTP_SSL_READ, ssl, buf+bytes_total,
+                                                BUFSIZ-bytes_total, &bytes_recvd);
+        switch (rc) {
+            case HTTP_SSL_SD_DETECT:
+                fprintf(stderr, "shutdown flag caught during SSL_read\n");
                 http_request_free(http_request, HTTP_FREE_STRCT);
+                *status_code = 0;
+                *close_connection = 0; //NULL return + 0 stat code + 0 close_con will cause shutdown
                 return NULL;
-            }
-            fprintf(stderr, "client didn't complete request.\n");
-            *status_code = 400;
-            http_request_free(http_request, HTTP_FREE_STRCT);
-            return NULL;
+            case HTTP_SSL_CLOSED:
+                // if (is_first_iter) {
+                //     *status_code = 0;
+                //     *close_connection = 1;
+                //     http_request_free(http_request, HTTP_FREE_STRCT);
+                //     return NULL;
+                // }
+                //fprintf(stderr, "client didn't complete request.\n");
+                http_request_free(http_request, HTTP_FREE_STRCT);
+                *close_connection = 1;
+                *status_code = 0;
+                return NULL;
+            case HTTP_SSL_FATAL_ERR:
+                fprintf(stderr,"SSL_read fatal error\n");
+                http_request_free(http_request, HTTP_FREE_STRCT);
+                *close_connection = 0; //NULL return + 0 stat code + 0 close_con will cause shutdown
+                return NULL;
+            case HTTP_SSL_THISCONN_ERR:
+                fprintf(stderr, "SSL_read connection specific error.\n");
+                http_request_free(http_request, HTTP_FREE_STRCT);
+                *close_connection = 1; //this will break the loop
+                return NULL;
+            case HTTP_SSL_OK:
+                bytes_total+=bytes_recvd;
         }
-        bytes_total+=bytes_recvd;
 
         ssize_t bytes_parsed = parse_request_line(buf, bytes_total, &http_request->req_line, status_code);
         if (bytes_parsed == -1) {
@@ -91,11 +191,11 @@ struct http_request *http_request_reader(int client_fd, unsigned int *status_cod
             break; //goto headers
         }
 
-        is_first_iter = 0;
+        //is_first_iter = 0;
     }
     // do request line processing here.
 
-    while (true) {
+    while (1) {
         ssize_t bytes_parsed = parse_headers(buf, bytes_total, &http_request->headers, status_code);
         if (bytes_parsed == -1) {
             fprintf(stderr, "invalid header section.\n");
@@ -115,32 +215,34 @@ struct http_request *http_request_reader(int client_fd, unsigned int *status_cod
             break; //goto body
         }
         //no headers section yet (\r\n\r\n) waiting for more bytes:
-continue_recv: //for recovering from timeout
-        bytes_recvd = recv(client_fd, buf+bytes_total, BUFSIZ-bytes_total, 0);
-        if (bytes_recvd < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                //timeout
-                if (shutdown_flag) {
-                    fprintf(stderr, "shutdown flag caught during recv timeout\n");
-                    http_request_free(http_request, HTTP_FREE_REQL);
-                    return NULL;
-                }
-                //no shutdown
-                goto continue_recv;
-            }
-            fprintf(stderr,"error reading from socket: %s\n", strerror(errno));
-            *status_code = 500;
-            http_request_free(http_request, HTTP_FREE_REQL);
-            return NULL;
+        enum http_ssl_rc rc = http_ssl_io_helper(HTTP_SSL_READ, ssl, buf+bytes_total,
+                                                        BUFSIZ-bytes_total, &bytes_recvd);
+        switch (rc) {
+            case HTTP_SSL_SD_DETECT:
+                fprintf(stderr, "shutdown flag caught during SSL_read\n");
+                http_request_free(http_request, HTTP_FREE_REQL);
+                *status_code = 0;
+                *close_connection = 0; //NULL return + 0 stat code + 0 close_con will cause shutdown
+                return NULL;
+            case HTTP_SSL_CLOSED:
+                //fprintf(stderr, "client didn't complete request.\n");
+                http_request_free(http_request, HTTP_FREE_REQL);
+                *close_connection = 1;
+                *status_code = 0;
+                return NULL;
+            case HTTP_SSL_FATAL_ERR:
+                fprintf(stderr,"SSL_read fatal error\n");
+                http_request_free(http_request, HTTP_FREE_REQL);
+                *close_connection = 0; //NULL return + 0 stat code + 0 close_con will cause shutdown
+                return NULL;
+            case HTTP_SSL_THISCONN_ERR:
+                fprintf(stderr, "SSL_read connection specific error.\n");
+                http_request_free(http_request, HTTP_FREE_REQL);
+                *close_connection = 1; //this will break the loop
+                return NULL;
+            case HTTP_SSL_OK:
+                bytes_total+=bytes_recvd;
         }
-        //is the connection closed?
-        if (bytes_recvd == 0) {
-            fprintf(stderr, "client didn't complete request.\n");
-            *status_code = 400;
-            http_request_free(http_request, HTTP_FREE_REQL);
-            return NULL;
-        }
-        bytes_total+=bytes_recvd;
     }
 
     //do headers processing here. check Content-length if not GET or other body-less methods
@@ -179,7 +281,7 @@ continue_recv: //for recovering from timeout
         //and add max_content_length
     } //length is valid, reading body:
 
-    char *body_buf = malloc(length); //free this
+    char *body_buf = malloc(length);
     if (!body_buf) {
         fprintf(stderr, "malloc failed: %s\n", strerror(errno));
         *status_code = 500;
@@ -192,37 +294,38 @@ continue_recv: //for recovering from timeout
     }
     else { //full body isn't received yet
         memcpy(body_buf, buf, bytes_total);
-        while (true) {
-            bytes_recvd = recv(client_fd, body_buf+bytes_total, length-bytes_total, 0);
-            if (bytes_recvd < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    //timeout
-                    if (shutdown_flag) {
-                        fprintf(stderr, "shutdown flag caught during recv timeout\n");
-                        free(body_buf);
-                        http_request_free(http_request, HTTP_FREE_HDRS);
-                        return NULL;
-                    }
-                    //no shutdown
-                    continue;
-                }
-                fprintf(stderr,"error reading from socket: %s\n", strerror(errno));
-                *status_code = 500;
-                free(body_buf);
-                http_request_free(http_request, HTTP_FREE_HDRS);
-                return NULL;
+        while (1) {
+            enum http_ssl_rc rc = http_ssl_io_helper(HTTP_SSL_READ, ssl, body_buf+bytes_total,
+                                                length-bytes_total, &bytes_recvd);
+            switch (rc) {
+                case HTTP_SSL_SD_DETECT:
+                    fprintf(stderr, "shutdown flag caught during SSL_read\n");
+                    http_request_free(http_request, HTTP_FREE_HDRS);
+                    *status_code = 0;
+                    *close_connection = 0; //NULL return + 0 stat code + 0 close_con will cause shutdown
+                    return NULL;
+                case HTTP_SSL_CLOSED:
+                    fprintf(stderr, "client didn't complete request.\n");
+                    http_request_free(http_request, HTTP_FREE_HDRS);
+                    *close_connection = 1;
+                    *status_code = 0;
+                    return NULL;
+                case HTTP_SSL_FATAL_ERR:
+                    fprintf(stderr,"SSL_read fatal error\n");
+                    http_request_free(http_request, HTTP_FREE_HDRS);
+                    *close_connection = 0; //NULL return + 0 stat code + 0 close_con will cause shutdown
+                    return NULL;
+                case HTTP_SSL_THISCONN_ERR:
+                    fprintf(stderr, "SSL_read connection specific error.\n");
+                    http_request_free(http_request, HTTP_FREE_HDRS);
+                    *close_connection = 1; //this will break the loop
+                    return NULL;
+                case HTTP_SSL_OK:
+                    bytes_total+=bytes_recvd;
             }
-            bytes_total+=bytes_recvd;
             if (bytes_total >= length) {
                 http_request->body = body_buf;
                 break; //success!!
-            }
-            if (bytes_recvd == 0) {
-                fprintf(stderr, "client didn't complete request.\n");
-                *status_code = 400;
-                free(body_buf);
-                http_request_free(http_request, HTTP_FREE_HDRS);
-                return NULL;
             }
         }
     }
@@ -233,11 +336,17 @@ continue_recv: //for recovering from timeout
 ssize_t parse_request_line(char *buf_start, size_t size, struct request_line *req_line, unsigned int *status_code) {
     for (ssize_t i = 0; i < size-1; i++) {
         if (buf_start[i] == '\r' && buf_start[i+1] == '\n') { //found
-            char req_line_buf[i+1];
+            char *req_line_buf = malloc(i+1);
+            if (req_line_buf == NULL) {
+                fprintf(stderr,"failed to allocate\n");
+                *status_code = 500;
+                return -1;
+            }
             memcpy(req_line_buf, buf_start, i);
             req_line_buf[i] = '\0'; //could check if any nullbytes were in the buffer and reject it
             if (strlen(req_line_buf) != i) {
                 *status_code = 400;
+                free(req_line_buf);
                 return -1; //bad request, null bytes inside it.
 
             }
@@ -251,18 +360,21 @@ ssize_t parse_request_line(char *buf_start, size_t size, struct request_line *re
             if (req_line->method == NULL) {
                 fprintf(stderr,"failed to allocate\n");
                 *status_code = 500;
-                return -1; //no resource to free
+                free(req_line_buf);
+                return -1;
             }
             //is_valid_path here
             req_line->origin = strdup(path_buf);
             if (req_line->origin == NULL) {
                 fprintf(stderr,"failed to allocate\n");
                 *status_code = 500;
+                free(req_line_buf);
                 free(req_line->method);
                 return -1;
             }
             if (strncmp(version_buf, "1.1", 3) != 0) {
                 *status_code = 505;
+                free(req_line_buf);
                 free(req_line->method);
                 free(req_line->origin);
                 return -1; //version unsupported
@@ -271,17 +383,19 @@ ssize_t parse_request_line(char *buf_start, size_t size, struct request_line *re
             if (req_line->version == NULL) {
                 fprintf(stderr,"failed to allocate\n");
                 *status_code = 500;
+                free(req_line_buf);
                 free(req_line->method);
                 free(req_line->origin);
                 return -1;
             }
+            free(req_line_buf);
             return i+2; //skip the CRLF
         }
     }
     return 0;
 }
 ssize_t parse_headers(char *buf_start, size_t size, struct_header ***headers_ptr, unsigned int *status_code) {
-    char *pos = buf_start; //buf_start remains the base
+
     if (size == 2 && buf_start[0] == '\r' && buf_start [1] == '\n') { //empty headers
         *headers_ptr = hash_init_table();
         if (*headers_ptr == NULL) {
@@ -297,29 +411,43 @@ ssize_t parse_headers(char *buf_start, size_t size, struct_header ***headers_ptr
             buf_start[i+2] == '\r' &&
             buf_start[i+3] == '\n') {
             //headers found
-            *headers_ptr = hash_init_table();
-            if (*headers_ptr == NULL) {
+            char *headers_buf = malloc(size + 1);
+            if (headers_buf == NULL) {
                 fprintf(stderr,"failed to allocate\n");
                 *status_code = 500;
                 return -1;
             }
+            memcpy(headers_buf, buf_start, size);
+            headers_buf[size] = '\0';
+            char *pos = headers_buf; //headers_buf remains the base
+
+            *headers_ptr = hash_init_table();
+            if (*headers_ptr == NULL) {
+                fprintf(stderr,"failed to allocate\n");
+                *status_code = 500;
+                free(headers_buf);
+                return -1;
+            }
             struct_header **headers = *headers_ptr;
-            while (true) {
+            while (1) {
                 struct_header *header = calloc(1, sizeof(struct_header));
                 if (header == NULL) {
                     fprintf(stderr,"failed to allocate\n");
                     *status_code = 500;
                     hash_free_table(headers, free);
+                    free(headers_buf);
                     return -1;
                 }
                 char key_buf[BUFSIZ];
                 char val_buf[BUFSIZ];
+
                 if (sscanf(pos, "%[^:\r\n]: %[^\r\n]", key_buf, val_buf) != 2) {
                     //malformed header
                     //free previous ones
                     *status_code = 400;
                     free(header);
                     hash_free_table(headers, free);
+                    free(headers_buf);
                     return -1;
                 }
                 for (unsigned char *p = key_buf; *p; p++) *p = tolower(*p); //lowercase the string, assuming asccii
@@ -329,6 +457,7 @@ ssize_t parse_headers(char *buf_start, size_t size, struct_header ***headers_ptr
                     *status_code = 500;
                     free(header);
                     hash_free_table(headers, free);
+                    free(headers_buf);
                     return -1;
                 }
                 header->value = strdup(val_buf);
@@ -338,6 +467,7 @@ ssize_t parse_headers(char *buf_start, size_t size, struct_header ***headers_ptr
                     free(header->key);
                     free(header);
                     hash_free_table(headers, free);
+                    free(headers_buf);
                     return -1;
                 }
                 //for header merging do -> check if key is Set-Cookie ->
@@ -350,12 +480,14 @@ ssize_t parse_headers(char *buf_start, size_t size, struct_header ***headers_ptr
                     fprintf(stderr,"strstr failed\n");
                     *status_code = 500;
                     hash_free_table(headers, free); //current header is already in the table
+                    free(headers_buf);
                     return -1;
                 }
-                if (pos == &buf_start[i])
+                if (pos == &headers_buf[i])
                     break; //end of buffer
                 pos +=2; //skip a CRLF
             }
+            free(headers_buf);
             return i+4; //skip two CRLFs
         }
     }
@@ -424,14 +556,16 @@ void http_response_free(struct http_response *http_response, int mode) {
 }
 
 
-ssize_t send_all(int sockfd, const void *buf, size_t len, int flags); //helper for send
+ssize_t send_all(int sockfd, const void *buf, size_t len, int flags); //helper for send. unused
 
-ssize_t http_response_sender(int client_fd, struct http_response *http_response, int close_connection) {
+int http_response_sender(SSL *ssl, struct http_response *http_response, int close_connection, size_t *bytes_sent) {
     //initialize the struct to zero before filling with data and passing here
     size_t bufsiz = BUFSIZ;
     char *msg_buf = malloc(BUFSIZ); //free at the end, return number of bytes sent
-    if (msg_buf == NULL)
+    if (msg_buf == NULL) {
+        perror("malloc");
         return -1;
+    }
 
     size_t cur_len = 0;
     size_t msg_len = 0;
@@ -445,6 +579,7 @@ ssize_t http_response_sender(int client_fd, struct http_response *http_response,
                 bufsiz *= 2; \
             char *temp_ptr = realloc(msg_buf, bufsiz); \
             if (temp_ptr == NULL) { \
+                perror("malloc"); \
                 free(msg_buf); \
                 return -1; \
             } \
@@ -460,6 +595,7 @@ ssize_t http_response_sender(int client_fd, struct http_response *http_response,
             if (http_response->stat_line.status_code == http_status_list[i].code) {
                 http_response->stat_line.reason = strdup(http_status_list[i].reason);
                 if (http_response->stat_line.reason == NULL) { //strdup failure
+                    perror("malloc");
                     free(msg_buf);
                     return -1;
                 }
@@ -467,8 +603,12 @@ ssize_t http_response_sender(int client_fd, struct http_response *http_response,
             }
         }
         if (http_response->stat_line.reason == NULL) { //couldn't find the status code entry
-            free(msg_buf);
-            return -1;
+            http_response->stat_line.reason = strdup("");
+            if (http_response->stat_line.reason == NULL) { //strdup failure
+                perror("malloc");
+                free(msg_buf);
+                return -1;
+            }
         }
     }
     cur_len = strlen(http_response->stat_line.reason) + 2; //CRLF
@@ -512,12 +652,38 @@ ssize_t http_response_sender(int client_fd, struct http_response *http_response,
         msg_len += cur_len; //this never included the trailing null-term and neither should the memcpy
     }
 
-    ssize_t bytes_sent = send_all(client_fd, msg_buf, msg_len, 0);
-    free(msg_buf); //response struct will be free'd by the caller
-    return bytes_sent;
+    //ssize_t bytes_sent = send_all(client_fd, msg_buf, msg_len, 0);
+    *bytes_sent = 0;
+    enum http_ssl_rc rc = http_ssl_io_helper(HTTP_SSL_WRITE, ssl, msg_buf, msg_len, bytes_sent);
+    switch (rc) {
+        case HTTP_SSL_SD_DETECT:
+            fprintf(stderr, "shutdown flag caught during SSL_write\n");
+            free(msg_buf);
+            return -1;
+        case HTTP_SSL_FATAL_ERR:
+            fprintf(stderr,"SSL_write fatal error\n");
+            free(msg_buf);
+            return -1;
+        case HTTP_SSL_THISCONN_ERR:
+            fprintf(stderr, "SSL_write connection specific error.\n");
+            free(msg_buf);
+            *bytes_sent = 0; //this will break out of the caller loop
+            return 0;
+        case HTTP_SSL_CLOSED:
+            fprintf(stderr, "server couldn't complete response.\n");
+            SSL_shutdown(ssl);
+            free(msg_buf);
+            *bytes_sent = 0;
+            return 0;
+        case HTTP_SSL_OK:
+            free(msg_buf);
+            if (close_connection)
+                 SSL_shutdown(ssl);
+            return 0;
+    }
 }
 
-ssize_t send_all(int sockfd, const void *buf, size_t len, int flags) {
+ssize_t send_all(int sockfd, const void *buf, size_t len, int flags) { //unused since we have openssl
     ssize_t total_sent = 0;
     const char *p = buf;
     while (total_sent < len) {
@@ -539,7 +705,8 @@ ssize_t send_all(int sockfd, const void *buf, size_t len, int flags) {
                 continue;
             }
             fprintf(stderr, "error sending: %s\n", strerror(errno));
-            return -1;
+            return total_sent; //we don't mind a client's failure
+            //we log and move on
         }
         if (n == 0) {
             //socket closed unexpectedly

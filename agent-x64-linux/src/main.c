@@ -144,6 +144,7 @@ char *agent_init(void) {
         return NULL;
     }
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_CAINFO, SERVER_CERT_PATH);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&response_buf);
     rc_curl = curl_easy_perform(curl);
@@ -224,6 +225,7 @@ void *beacon_routine(void *) {
         }
         struct response_buf response_buf = {0};
         curl_easy_setopt(curl, CURLOPT_URL, full_url);
+        curl_easy_setopt(curl, CURLOPT_CAINFO, SERVER_CERT_PATH);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &write_cb);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&response_buf);
         rc_curl = curl_easy_perform(curl);
@@ -388,6 +390,7 @@ void *task_routine(void *) {
             exit(EXIT_FAILURE);
         }
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_CAINFO, SERVER_CERT_PATH);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &write_cb);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&response_buf);
         rc_curl = curl_easy_perform(curl);

@@ -7,7 +7,9 @@
 #define UUID_STR_SIZE 37 //agent and task IDs, 36 + 0x00
 #define AGENT_BUFSIZ 4096 //so far only used in reading execl pipe
 //server info
-#define SERVER_URL "http://127.0.0.1:4221/"
+#define SERVER_URL "https://127.0.0.1:4221/"
+#define SERVER_CERT_PATH "../certs/server-cert.pem" //could use CURLOPT_CAINFO_BLOB to load from memory buffer
+//or curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0); to bypass
 #define AGENTS_URL SERVER_URL "agents"
 #define TASKS_URL SERVER_URL "tasks"
 #define RESULTS_URL SERVER_URL "results"

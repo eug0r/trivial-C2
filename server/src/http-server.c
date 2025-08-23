@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <netinet/ip.h>
 #include <sys/types.h>
 #include <arpa/inet.h>
 #include <string.h>
@@ -11,12 +10,17 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
+#include "http-server.h"
 #include "hash-table.h"
 #include "http-parser.h"
 
-#define CONNECTION_BACKLOG 20
-#define THREAD_POOL_SIZE 20
-#define HTTP_PORT_NO 4221
+#include<openssl/bio.h>
+#include<openssl/ssl.h>
+#include<openssl/err.h>
+#include<openssl/pem.h>
+#include<openssl/x509.h>
+
+
 //only persistent sequential HTTP/1.1 connection is supported. no pipelining or multiplexing
 //header keys are stored as lowercase
 //need to add support for HEAD request, better understanding and handling of headers, and simple compression
@@ -24,6 +28,7 @@
 struct client_args {
 	int client_fd;
 	int (*router_fn)(struct http_response *, struct http_request *);
+	SSL_CTX *ctx;
 };
 struct task_node {
 	struct client_args *args;
@@ -43,7 +48,7 @@ void *worker_routine(void *args);
 int handle_client(struct client_args *c_args);
 
 void *control_routine(void *args); //a thread that listens for commands like quit
-//right now it listens on stdin, could do it on a different port
+//right now it listens on stdin, could do it on a different channel
 
 void handle_signal(int sig) {
 	shutdown_flag = 1;
@@ -51,9 +56,38 @@ void handle_signal(int sig) {
 }
 
 
+
+SSL_CTX *create_server_context(const char *cert_path, const char *key_path) {
+	SSL_CTX *ctx;
+	ctx = SSL_CTX_new(TLS_server_method());
+	if (!ctx) {
+		ERR_print_errors_fp(stderr);
+		exit(EXIT_FAILURE);
+	}
+	//set server certificate
+	if (SSL_CTX_use_certificate_file(ctx, cert_path, SSL_FILETYPE_PEM) <= 0) {
+		ERR_print_errors_fp(stderr);
+		exit(EXIT_FAILURE);
+	}
+	//set server private key
+	if (SSL_CTX_use_PrivateKey_file(ctx, key_path, SSL_FILETYPE_PEM) <= 0) {
+		ERR_print_errors_fp(stderr);
+		exit(EXIT_FAILURE);
+	}
+	//verify
+	if (!SSL_CTX_check_private_key(ctx)) {
+		fprintf(stderr, "privkey and certificate don't match\n");
+		exit(EXIT_FAILURE);
+	}
+	//SSL_CTX_set_ecdh_auto(ctx, 1);
+	//SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+	return ctx;
+}
+
+
 int http_init_server(int (*router)(struct http_response *, struct http_request *)) {
-	//disable output buffering
-	setbuf(stdout, NULL);
+
+	//setbuf(stdout, NULL);
  	setbuf(stderr, NULL);
 
 	//block sigint and sigterm
@@ -81,12 +115,24 @@ int http_init_server(int (*router)(struct http_response *, struct http_request *
 		perror("sigaction SIGTERM");
 		return 1;
 	}
+
+	//ignore sigpipe. when peer sends close notice (fin) but
+	//doesn't wait for ours, it causes SSL_shutdown to raise
+	//sigpipe. we can catch it with errno == EPIPE
+	signal(SIGPIPE, SIG_IGN);
+
+	//initialize ssl
+	SSL_load_error_strings();
+	SSL_library_init();
+	OpenSSL_add_all_algorithms();
+	SSL_CTX *ctx = create_server_context(HTTP_SERVER_CERT_PATH, HTTP_SERVER_PRIVKEY_PATH);
+
 	//create worker threads
-	pthread_t worker_pool[THREAD_POOL_SIZE];
+	pthread_t worker_pool[HTTP_THREAD_POOL_SIZE];
 	pthread_mutex_init(&task_queue_mutex, NULL);
 	pthread_cond_init(&task_queue_cond, NULL);
 
-	for (int i = 0; i < THREAD_POOL_SIZE; i++) {
+	for (int i = 0; i < HTTP_THREAD_POOL_SIZE; i++) {
 		if (pthread_create(&worker_pool[i], NULL, &worker_routine, NULL) != 0) {
 			perror("pthread_create");
 			return 1;
@@ -130,8 +176,7 @@ int http_init_server(int (*router)(struct http_response *, struct http_request *
 		goto join_all_threads;
 	}
 
-	//const int connection_backlog = 5; //making this a macro
-	if (listen(server_fd, CONNECTION_BACKLOG) != 0) {
+	if (listen(server_fd, HTTP_CONNECTION_BACKLOG) != 0) {
 		perror("listen");
 		close(server_fd);
 		shutdown_flag = 1;
@@ -139,7 +184,6 @@ int http_init_server(int (*router)(struct http_response *, struct http_request *
 	}
 
 	printf("Waiting for a client to connect...\n");
-
 
 	while (shutdown_flag == 0) {
 		fd_set rfds;
@@ -209,6 +253,7 @@ int http_init_server(int (*router)(struct http_response *, struct http_request *
 		}
 		c_args->client_fd = client_fd;
 		c_args->router_fn = router;
+		c_args->ctx = ctx;
 
 		pthread_mutex_lock(&task_queue_mutex);
 		if (enqueue_task(c_args) == -1) {
@@ -241,7 +286,7 @@ join_workers:
 	pthread_cond_broadcast(&task_queue_cond);
 	pthread_mutex_unlock(&task_queue_mutex);
 
-	for (int i = 0; i < THREAD_POOL_SIZE; i++) {
+	for (int i = 0; i < HTTP_THREAD_POOL_SIZE; i++) {
 		if (pthread_join(worker_pool[i], NULL) != 0) {
 			perror("Failed to join the thread");
 			return 1;
@@ -267,12 +312,16 @@ join_workers:
 	pthread_mutex_destroy(&task_queue_mutex);
 	pthread_cond_destroy(&task_queue_cond);
 
+	SSL_CTX_free(ctx);
+	ERR_free_strings();
+	EVP_cleanup();
+
 	return 0;
 }
 
 void *control_routine(void *args) {
 	char buf[16];
-	while (fgets(buf, sizeof(buf), stdin)) { //later version listens on a different port
+	while (fgets(buf, sizeof(buf), stdin)) { //later version listens on a different channel
 		if (strncmp(buf, "quit", 4) == 0) {
 			shutdown_flag = 1;
 			pthread_mutex_lock(&task_queue_mutex);
@@ -314,12 +363,12 @@ int handle_client(struct client_args *c_args) {
 		return -1;
 	int client_fd = c_args->client_fd;
 	int (*router_fn)(struct http_response *, struct http_request *) = c_args->router_fn;
+	SSL_CTX *ctx = c_args->ctx;
 
 	struct timeval client_timeout = {
-		.tv_sec = 2,
+		.tv_sec = 1,
 		.tv_usec = 0
 	};
-
 	if (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO,
 		&client_timeout, sizeof(client_timeout)) < 0) {
 		perror("setsockopt SO_RCVTIMEO");
@@ -334,16 +383,101 @@ int handle_client(struct client_args *c_args) {
 		return -1;
 	}
 
+	//creating ssl object
+	SSL *ssl = SSL_new(ctx);
+	if (!ssl) {
+		fprintf(stderr, "SSL_new failed\n");
+		close(client_fd);
+		return -1;
+	}
+	if (!SSL_set_fd(ssl, client_fd)) {
+		fprintf(stderr, "SSL_set_fd failed\n");
+		SSL_free(ssl);
+		close(client_fd);
+		return -1;
+	}
+	//ssl_accept, handshake
+	while (1) {
+		int rc = SSL_accept(ssl);
+		if (rc == 1)
+			break; //handshake complete
+
+		int err = SSL_get_error(ssl, rc);
+		if (err == SSL_ERROR_WANT_READ ||
+			err == SSL_ERROR_WANT_WRITE ||
+			err == SSL_ERROR_WANT_ACCEPT) { //this last one is probably unnecessary
+			//timeout triggers this:
+			if (shutdown_flag) {
+				fprintf(stderr, "shutdown flag caught during SSL_accept WANT_*.\n");
+				SSL_shutdown(ssl);
+				SSL_free(ssl);
+				close(client_fd);
+				return -1;
+			}
+			continue; //retry handshake
+		}
+		if (err == SSL_ERROR_ZERO_RETURN) {
+			fprintf(stderr, "client closed without completing handshake\n");
+			SSL_shutdown(ssl); //check errno EPIPE
+			SSL_free(ssl);
+			close(client_fd);
+			return 0;
+		}
+		if (err == SSL_ERROR_SYSCALL) {
+			//probably legacy timeout:
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				fprintf(stderr, "SSL_accept timeout happened\n");
+				if (shutdown_flag) {
+					fprintf(stderr, "shutdown flag caught during SSL_accept timeout.\n");
+					SSL_shutdown(ssl);
+					SSL_free(ssl);
+					close(client_fd);
+					return -1;
+				}
+				continue; //retry handshake
+			}
+			fprintf(stderr, "SSL_accept syscall error: %s\n", strerror(errno));
+			//SSL_shutdown must not be called
+			SSL_free(ssl);
+			close(client_fd);
+			return 0; //not sure if this could be program-wide fatal. return -1 if so
+		}
+		if (err == SSL_ERROR_SSL) {
+			fprintf(stderr, "SSL_accept protocol error.\n");
+			unsigned long e;
+			while ((e = ERR_get_error())) {
+				char errbuf[256];
+				ERR_error_string_n(e, errbuf, sizeof(errbuf));
+				fprintf(stderr, "openssl error: %s\n", errbuf);
+			}
+			//SSL_shutdown should not be called
+			SSL_free(ssl);
+			close(client_fd);
+			return 0;
+		}
+		//other error
+		fprintf(stderr, "SSL_accept failed: rc=%d, err=%d\n", rc, err);
+		SSL_shutdown(ssl);
+		SSL_free(ssl);
+		close(client_fd);
+		return 0;
+	}
+	//handshake success
+	//fprintf(stderr, "handshake success\n");
+
+	//main connection loop
 	int close_connection = 0;
-	while (!close_connection && shutdown_flag == 0) { //here
+	while (close_connection == 0 && shutdown_flag == 0) { //here
 		struct http_response *http_response = calloc(1, sizeof(struct http_response));
 		if (http_response == NULL) {
 			fprintf(stderr, "failed to allocate.\n");
+			//SSL_shutdown(ssl);
+			SSL_free(ssl);
 			close(client_fd);
 			return -1;
 		}
 		http_response->stat_line.status_code = 0;
-		struct http_request *http_request = http_request_reader(client_fd, &http_response->stat_line.status_code, &close_connection);
+		struct http_request *http_request = http_request_reader(ssl, &http_response->stat_line.status_code, &close_connection);
 		if (http_request == NULL) {
 			if (http_response->stat_line.status_code == 0) {
 				if (close_connection == 1) {
@@ -351,8 +485,11 @@ int handle_client(struct client_args *c_args) {
 					break; //connection closed by the client
 				}
 				http_response_free(http_response, HTTP_FREE_STRCT);
+				//SSL_shutdown(ssl)
+				SSL_free(ssl);
 				close(client_fd);
-				return -1; //failed to allocate before even reading, or shutdown_flag
+				return -1; //failed to allocate before even reading,
+				//or shutdown_flag
 				//caught in timeout
 			}
 			else {
@@ -363,37 +500,49 @@ int handle_client(struct client_args *c_args) {
 				if (connection_header  == NULL) {
 					fprintf(stderr, "failed to allocate.\n");
 					http_response_free(http_response, HTTP_FREE_HDRS);
+					SSL_free(ssl);
 					close(client_fd);
 					return -1;
 				}
 				connection_header->key = "Connection";
 				connection_header->value = "close";
 				hash_add_node(http_response->headers, connection_header); */
-				ssize_t bytes_sent = http_response_sender(client_fd, http_response, 1); //1 sets the connection: close header
-				if (bytes_sent == -1) {
+				size_t bytes_sent = 0;
+				int rc = http_response_sender(ssl, http_response, 1, &bytes_sent); //1 sets the connection: close header
+				if (rc == -1) { //shutdown flag caught or fatal error
 					fprintf(stderr, "http_response_sender failed.\n");
 					http_response_free(http_response, HTTP_FREE_STATL);
+					SSL_free(ssl);
 					close(client_fd);
 					return -1;
+				} //rc == 0 success
+				if (bytes_sent == 0) {
+					http_response_free(http_response, HTTP_FREE_STATL);
+					break;
 				}
 				printf("%zu bytes were sent.\n", bytes_sent);
 				http_response_free(http_response, HTTP_FREE_STATL); //FREE_HDRS if you uncomment the code and pass 0
 				break; //closing connection
 			}
 		}
-		else {
+		else { //http_request is good
 			//pass it to the router which in turn passes it to the handlers.
 			int result = router_fn(http_response, http_request); //handlers return 0 if they succeed
 			if (result == 0) { //success
-				size_t bytes_sent = http_response_sender(client_fd, http_response, close_connection);
-				if (bytes_sent == -1) {
+				size_t bytes_sent = 0;
+				int rc = http_response_sender(ssl, http_response, close_connection, &bytes_sent);
+				http_request_free(http_request, HTTP_FREE_BODY);
+				http_response_free(http_response, HTTP_FREE_BODY);
+				if (rc == -1) { //shutdown flag caught or fatal error
 					fprintf(stderr, "http_response_sender failed.\n");
-					http_request_free(http_request, HTTP_FREE_BODY);
-					http_response_free(http_response, HTTP_FREE_BODY);
+					SSL_free(ssl);
 					close(client_fd);
 					return -1;
-				}
+				} //rc == 0 success
+				if (bytes_sent == 0)
+					break;
 				printf("%zu bytes were sent.\n", bytes_sent);
+				continue;
 			}
 			else if (result == -1) {
 				http_response_free(http_response, HTTP_FREE_BODY);
@@ -401,24 +550,29 @@ int handle_client(struct client_args *c_args) {
 				if (http_response == NULL) {
 					fprintf(stderr, "failed to allocate.\n");
 					http_request_free(http_request, HTTP_FREE_BODY);
+					SSL_free(ssl);
 					close(client_fd);
 					return -1;
 				}
 				http_response->stat_line.status_code = 500; //internal server error
-				size_t bytes_sent = http_response_sender(client_fd, http_response, close_connection);
-				if (bytes_sent == -1) {
+				size_t bytes_sent = 0;
+				int rc = http_response_sender(ssl, http_response, close_connection, &bytes_sent);
+				http_request_free(http_request, HTTP_FREE_BODY);
+				http_response_free(http_response, HTTP_FREE_BODY);
+				if (rc == -1) {
 					fprintf(stderr, "http_response_sender failed.\n");
-					http_request_free(http_request, HTTP_FREE_BODY);
-					http_response_free(http_response, HTTP_FREE_BODY);
+					SSL_free(ssl);
 					close(client_fd);
 					return -1;
 				}
+				if (bytes_sent == 0)
+					break;
 				printf("%zu bytes were sent.\n", bytes_sent);
+				continue;
 			}
-			http_request_free(http_request, HTTP_FREE_BODY);
-			http_response_free(http_response, HTTP_FREE_BODY);
 		}
 	}
+	SSL_free(ssl);
 	close(client_fd);
 	return 0;
 }

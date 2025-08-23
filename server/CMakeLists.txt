@@ -10,6 +10,7 @@ find_package(SQLite3 REQUIRED)
 #to use your own libuuid installation comment
 #the next line and the respective linking line
 find_package(unofficial-libuuid REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 
 add_executable(c2-server ${SOURCE_FILES})
@@ -20,3 +21,4 @@ target_link_libraries(c2-server PRIVATE SQLite::SQLite3)
 #target_link_libraries(c2-server PRIVATE uuid)
 #if it isn't:
 target_link_libraries(c2-server PRIVATE unofficial::UUID::uuid)
+target_link_libraries(c2-server PRIVATE OpenSSL::SSL OpenSSL::Crypto)
