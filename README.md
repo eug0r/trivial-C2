@@ -1,12 +1,14 @@
 # trivial-C2
 ## Overview
 trivial-C2 is a lightweight Command and Control (C2) framework built in C, for research and practice. \
+Loosly inspired by Josh Lospinoso's 'cpp-implant': https://github.com/JLospinoso/cpp-implant \
 It implements a client-server architecture setup where agents register with a central server, receive tasks, and return results, all managed through a simple control client. \
 The goal was to explore how such systems work at a lower level and to understand the typical challenges involved. For that reason, the project is written in C with minimal reliance on third-party libraries. \
-The server exposes a simple 'REST' API over HTTPS for: \
+\
+The server exposes a simple 'REST' API over HTTPS for:
 - Agent registration (tracking connected clients)
 - Tasking (issuing commands to selected agents)
-- Result collection (receiving and storing task outputs) \
+- Result collection (receiving and storing task outputs)
   
 The HTTP-server is completely home-brew and minimal. Openssl is used for TLS, Sqlite for the database, and Jannson for handling JSON. The Clients, however, use Libcurl for HTTPS connection.
 
@@ -33,7 +35,7 @@ If you wish to use your own libuuid installation remove it from vcpkg.json and r
 __post /agents:__
 - expects json object
 - `handle` string (given name) and `hostname` (victim's hostname extracted by the agent) must be present.
-- returns an agent-uuid that must be kept by the agent to use it for querying for tasks \
+- returns an agent-uuid that must be kept by the agent to use it for querying for tasks
 
 __get /agents:__
 - returns json array
