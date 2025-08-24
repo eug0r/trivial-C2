@@ -321,7 +321,7 @@ join_workers:
 
 void *control_routine(void *args) {
 	char buf[16];
-	while (fgets(buf, sizeof(buf), stdin)) { //later version listens on a different channel
+	while (fgets(buf, sizeof(buf), stdin)) { //later version can listen on a different channel
 		if (strncmp(buf, "quit", 4) == 0) {
 			shutdown_flag = 1;
 			pthread_mutex_lock(&task_queue_mutex);
@@ -466,112 +466,104 @@ int handle_client(struct client_args *c_args) {
 	//fprintf(stderr, "handshake success\n");
 
 	//main connection loop
-	int close_connection = 0;
-	while (close_connection == 0 && shutdown_flag == 0) { //here
+	enum http_req_rc req_rc;
+	enum http_res_rc res_rc;
+	size_t bytes_sent;
+	int close_connection = 0; //this is set based on requests' Connection: close header
+	//and determines whether to set this header in the response, and has nothing to do
+	//with failures, failures result in direct break (goto breakloop) or returning -1
+	while (close_connection == 0 && shutdown_flag == 0) {
 		struct http_response *http_response = calloc(1, sizeof(struct http_response));
 		if (http_response == NULL) {
-			fprintf(stderr, "failed to allocate.\n");
-			//SSL_shutdown(ssl);
+			perror("calloc");
 			SSL_free(ssl);
 			close(client_fd);
 			return -1;
 		}
 		http_response->stat_line.status_code = 0;
-		struct http_request *http_request = http_request_reader(ssl, &http_response->stat_line.status_code, &close_connection);
+		struct http_request *http_request = calloc(1, sizeof(struct http_request));
 		if (http_request == NULL) {
-			if (http_response->stat_line.status_code == 0) {
-				if (close_connection == 1) {
-					http_response_free(http_response, HTTP_FREE_STRCT);
-					break; //connection closed by the client
-				}
+			perror("calloc");
+			SSL_free(ssl);
+			close(client_fd);
+			return -1;
+		}
+		req_rc = http_request_reader(ssl, http_request, &http_response->stat_line.status_code,
+												  &close_connection);
+		switch (req_rc) {
+			/*http_request is only valid for use in the OK case. for first 3 cases, value of
+			status_code and close_connection shouldn't be used. SEND_ERR sends a response based on
+			the status code, and treats close_connection as 1 regardless of its value. OK case will
+			pass request to handlers, and use close_connection to set the Connection: close header*/
+			case HTTP_REQ_FATAL_ERR:
+			case HTTP_REQ_SD_DETECT:
+				http_request_free(http_request, HTTP_FREE_BODY);
 				http_response_free(http_response, HTTP_FREE_STRCT);
-				//SSL_shutdown(ssl)
 				SSL_free(ssl);
 				close(client_fd);
-				return -1; //failed to allocate before even reading,
-				//or shutdown_flag
-				//caught in timeout
-			}
-			else {
+				return -1;
+			case HTTP_REQ_THISCONN_ERR:
+			case HTTP_REQ_CLOSED:
+				http_request_free(http_request, HTTP_FREE_BODY);
+				http_response_free(http_response, HTTP_FREE_STRCT);
+				goto breakloop;
+			case HTTP_REQ_SEND_ERR: //status code has been set to valid error
+				http_request_free(http_request, HTTP_FREE_BODY);
 				//send() proper http response for the error status code.
 				http_response->content_length = 0;
-				/* http_response->headers = hash_init_table();
-				struct_header *connection_header = calloc(1, sizeof(struct_header));
-				if (connection_header  == NULL) {
-					fprintf(stderr, "failed to allocate.\n");
-					http_response_free(http_response, HTTP_FREE_HDRS);
-					SSL_free(ssl);
-					close(client_fd);
-					return -1;
+				bytes_sent = 0;
+				res_rc = http_response_sender(ssl, http_response, 1, &bytes_sent); //1 sets the connection: close header
+				http_response_free(http_response, HTTP_FREE_STATL);
+				switch (res_rc) {
+					case HTTP_RES_FATAL_ERR:
+					case HTTP_RES_SD_DETECT:
+						fprintf(stderr, "http_response_sender failed.\n");
+						SSL_free(ssl);
+						close(client_fd);
+						return -1;
+					case HTTP_RES_THISCONN_ERR:
+					case HTTP_RES_CLOSED:
+						goto breakloop;
+					case HTTP_RES_OK:
+						printf("%zu bytes were sent.\n", bytes_sent);
+						goto breakloop;
 				}
-				connection_header->key = "Connection";
-				connection_header->value = "close";
-				hash_add_node(http_response->headers, connection_header); */
-				size_t bytes_sent = 0;
-				int rc = http_response_sender(ssl, http_response, 1, &bytes_sent); //1 sets the connection: close header
-				if (rc == -1) { //shutdown flag caught or fatal error
-					fprintf(stderr, "http_response_sender failed.\n");
-					http_response_free(http_response, HTTP_FREE_STATL);
-					SSL_free(ssl);
-					close(client_fd);
-					return -1;
-				} //rc == 0 success
-				if (bytes_sent == 0) {
-					http_response_free(http_response, HTTP_FREE_STATL);
-					break;
+			case HTTP_REQ_OK:
+				//pass it to the router which in turn passes it to the handlers.
+				int result = router_fn(http_response, http_request); //handlers return 0 if they succeed
+				if (result == -1) { //router_fn failed, set http_response to generic error
+					http_response_free(http_response, HTTP_FREE_BODY);
+					http_response = calloc(1, sizeof(struct http_response));
+					if (http_response == NULL) {
+						perror("malloc");
+						http_request_free(http_request, HTTP_FREE_BODY);
+						SSL_free(ssl);
+						close(client_fd);
+						return -1;
+					}
+					http_response->stat_line.status_code = 500; //internal server error
 				}
-				printf("%zu bytes were sent.\n", bytes_sent);
-				http_response_free(http_response, HTTP_FREE_STATL); //FREE_HDRS if you uncomment the code and pass 0
-				break; //closing connection
-			}
-		}
-		else { //http_request is good
-			//pass it to the router which in turn passes it to the handlers.
-			int result = router_fn(http_response, http_request); //handlers return 0 if they succeed
-			if (result == 0) { //success
-				size_t bytes_sent = 0;
-				int rc = http_response_sender(ssl, http_response, close_connection, &bytes_sent);
+				bytes_sent = 0;
+				res_rc = http_response_sender(ssl, http_response, close_connection, &bytes_sent);
 				http_request_free(http_request, HTTP_FREE_BODY);
 				http_response_free(http_response, HTTP_FREE_BODY);
-				if (rc == -1) { //shutdown flag caught or fatal error
-					fprintf(stderr, "http_response_sender failed.\n");
-					SSL_free(ssl);
-					close(client_fd);
-					return -1;
-				} //rc == 0 success
-				if (bytes_sent == 0)
-					break;
-				printf("%zu bytes were sent.\n", bytes_sent);
-				continue;
-			}
-			else if (result == -1) {
-				http_response_free(http_response, HTTP_FREE_BODY);
-				http_response = calloc(1, sizeof(struct http_response));
-				if (http_response == NULL) {
-					fprintf(stderr, "failed to allocate.\n");
-					http_request_free(http_request, HTTP_FREE_BODY);
-					SSL_free(ssl);
-					close(client_fd);
-					return -1;
+				switch (res_rc) {
+					case HTTP_RES_FATAL_ERR:
+					case HTTP_RES_SD_DETECT:
+						fprintf(stderr, "http_response_sender failed.\n");
+						SSL_free(ssl);
+						close(client_fd);
+						return -1;
+					case HTTP_RES_THISCONN_ERR:
+					case HTTP_RES_CLOSED:
+						goto breakloop;
+					case HTTP_RES_OK:
+						printf("%zu bytes were sent.\n", bytes_sent);
+						continue;
 				}
-				http_response->stat_line.status_code = 500; //internal server error
-				size_t bytes_sent = 0;
-				int rc = http_response_sender(ssl, http_response, close_connection, &bytes_sent);
-				http_request_free(http_request, HTTP_FREE_BODY);
-				http_response_free(http_response, HTTP_FREE_BODY);
-				if (rc == -1) {
-					fprintf(stderr, "http_response_sender failed.\n");
-					SSL_free(ssl);
-					close(client_fd);
-					return -1;
-				}
-				if (bytes_sent == 0)
-					break;
-				printf("%zu bytes were sent.\n", bytes_sent);
-				continue;
-			}
 		}
 	}
+	breakloop:
 	SSL_free(ssl);
 	close(client_fd);
 	return 0;

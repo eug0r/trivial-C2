@@ -47,8 +47,27 @@ struct http_request {
     char *body;
 };
 
-struct http_request *http_request_reader(SSL *ssl, unsigned int *status_code, int *close_connection);
-int http_response_sender(SSL *ssl, struct http_response *http_response, int close_connection, size_t *bytes_sent);
+enum http_req_rc {
+    HTTP_REQ_OK, //pass to handlers
+    HTTP_REQ_SEND_ERR, //http_response->status_code is setup to the error, pass to response sender
+    HTTP_REQ_CLOSED, //peer closed the connection
+    HTTP_REQ_THISCONN_ERR, //error specific to this connection happened
+    HTTP_REQ_SD_DETECT, //shutdown signal detected
+    HTTP_REQ_FATAL_ERR //fatal error, caller should return -1 to worker thread to trigger shutdown
+};
+
+enum http_res_rc {
+    HTTP_RES_OK, //successfully sent response
+    HTTP_RES_CLOSED, //peer closed
+    HTTP_RES_THISCONN_ERR, //error specific to this connection happened
+    HTTP_RES_SD_DETECT, //shutdown signal detected
+    HTTP_RES_FATAL_ERR //fatal error, caller should return -1 to worker thread to trigger shutdown
+};
+
+enum http_req_rc http_request_reader(SSL *ssl, struct http_request *http_request,
+                                    unsigned int *status_code, int *close_connection);
+enum http_res_rc http_response_sender(SSL *ssl, struct http_response *http_response,
+                                      int close_connection, size_t *bytes_sent);
 
 ssize_t parse_request_line(char *buf_start, size_t size, struct request_line *req_line, unsigned int *status_code);
 ssize_t parse_headers(char *buf_start, size_t size, struct_header ***headers_ptr, unsigned int *status_code);

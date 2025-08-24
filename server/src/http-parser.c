@@ -123,15 +123,9 @@ static enum http_ssl_rc http_ssl_io_helper(enum http_ssl_io_fn fn, SSL *ssl, voi
     }
 }
 
-struct http_request *http_request_reader(SSL *ssl, unsigned int *status_code, int *close_connection) {
-    struct http_request *http_request = calloc(1, sizeof(struct http_request));
-    // struct http_request *http_request = malloc(sizeof(struct http_request));
-    // memset(http_request, 0, sizeof(struct http_request));
+enum http_req_rc http_request_reader(SSL *ssl, struct http_request *http_request,
+                                    unsigned int *status_code, int *close_connection) {
 
-    if (http_request == NULL) {
-        fprintf(stderr, "failed to allocate.\n");
-        return NULL; //if status_code not set and returned NULL, request isn't even read.
-    }
     char buf[BUFSIZ];
     size_t bytes_total = 0, bytes_recvd;
 
@@ -143,32 +137,19 @@ struct http_request *http_request_reader(SSL *ssl, unsigned int *status_code, in
         switch (rc) {
             case HTTP_SSL_SD_DETECT:
                 fprintf(stderr, "shutdown flag caught during SSL_read\n");
-                http_request_free(http_request, HTTP_FREE_STRCT);
-                *status_code = 0;
-                *close_connection = 0; //NULL return + 0 stat code + 0 close_con will cause shutdown
-                return NULL;
+                return HTTP_REQ_SD_DETECT;
+
             case HTTP_SSL_CLOSED:
-                // if (is_first_iter) {
-                //     *status_code = 0;
-                //     *close_connection = 1;
-                //     http_request_free(http_request, HTTP_FREE_STRCT);
-                //     return NULL;
-                // }
-                //fprintf(stderr, "client didn't complete request.\n");
-                http_request_free(http_request, HTTP_FREE_STRCT);
-                *close_connection = 1;
-                *status_code = 0;
-                return NULL;
+                return HTTP_REQ_CLOSED;
+
             case HTTP_SSL_FATAL_ERR:
                 fprintf(stderr,"SSL_read fatal error\n");
-                http_request_free(http_request, HTTP_FREE_STRCT);
-                *close_connection = 0; //NULL return + 0 stat code + 0 close_con will cause shutdown
-                return NULL;
+                return HTTP_REQ_FATAL_ERR;
+
             case HTTP_SSL_THISCONN_ERR:
                 fprintf(stderr, "SSL_read connection specific error.\n");
-                http_request_free(http_request, HTTP_FREE_STRCT);
-                *close_connection = 1; //this will break the loop
-                return NULL;
+                return HTTP_REQ_THISCONN_ERR;
+
             case HTTP_SSL_OK:
                 bytes_total+=bytes_recvd;
         }
@@ -176,14 +157,12 @@ struct http_request *http_request_reader(SSL *ssl, unsigned int *status_code, in
         ssize_t bytes_parsed = parse_request_line(buf, bytes_total, &http_request->req_line, status_code);
         if (bytes_parsed == -1) {
             fprintf(stderr, "invalid request line.\n");
-            http_request_free(http_request, HTTP_FREE_STRCT);
-            return NULL; //status code is already set up.
+            return HTTP_REQ_SEND_ERR; //status code is already set up.
         }
         if (bytes_parsed == 0 && bytes_total >= BUFSIZ) {
             fprintf(stderr, "request line too large.\n");
             *status_code = 400; //bad request
-            http_request_free(http_request, HTTP_FREE_STRCT);
-            return NULL;
+            return HTTP_REQ_SEND_ERR;
         }
         if (bytes_parsed) { //found request line, breaking
             bytes_total = bytes_total - bytes_parsed;
@@ -200,14 +179,12 @@ struct http_request *http_request_reader(SSL *ssl, unsigned int *status_code, in
         if (bytes_parsed == -1) {
             fprintf(stderr, "invalid header section.\n");
             //*status_code = 400;
-            http_request_free(http_request, HTTP_FREE_REQL);
-            return NULL; //status code is already set up.
+            return HTTP_REQ_SEND_ERR; //status code is already set up.
         }
         if (bytes_parsed == 0 && bytes_total >= BUFSIZ) {
             fprintf(stderr, "headers too large.\n");
             *status_code = 400;
-            http_request_free(http_request, HTTP_FREE_REQL);
-            return NULL;
+            return HTTP_REQ_SEND_ERR;
         }
         if (bytes_parsed) { //found headers, breaking
             bytes_total = bytes_total - bytes_parsed;
@@ -220,26 +197,19 @@ struct http_request *http_request_reader(SSL *ssl, unsigned int *status_code, in
         switch (rc) {
             case HTTP_SSL_SD_DETECT:
                 fprintf(stderr, "shutdown flag caught during SSL_read\n");
-                http_request_free(http_request, HTTP_FREE_REQL);
-                *status_code = 0;
-                *close_connection = 0; //NULL return + 0 stat code + 0 close_con will cause shutdown
-                return NULL;
+                return HTTP_REQ_SD_DETECT;
+
             case HTTP_SSL_CLOSED:
-                //fprintf(stderr, "client didn't complete request.\n");
-                http_request_free(http_request, HTTP_FREE_REQL);
-                *close_connection = 1;
-                *status_code = 0;
-                return NULL;
+                return HTTP_REQ_CLOSED;
+
             case HTTP_SSL_FATAL_ERR:
                 fprintf(stderr,"SSL_read fatal error\n");
-                http_request_free(http_request, HTTP_FREE_REQL);
-                *close_connection = 0; //NULL return + 0 stat code + 0 close_con will cause shutdown
-                return NULL;
+                return HTTP_REQ_FATAL_ERR;
+
             case HTTP_SSL_THISCONN_ERR:
                 fprintf(stderr, "SSL_read connection specific error.\n");
-                http_request_free(http_request, HTTP_FREE_REQL);
-                *close_connection = 1; //this will break the loop
-                return NULL;
+                return HTTP_REQ_THISCONN_ERR;
+
             case HTTP_SSL_OK:
                 bytes_total+=bytes_recvd;
         }
@@ -257,36 +227,33 @@ struct http_request *http_request_reader(SSL *ssl, unsigned int *status_code, in
     } else { //bogus value
         fprintf(stderr, "invalid connection header.\n");
         *status_code = 400;
-        http_request_free(http_request, HTTP_FREE_HDRS);
-        return NULL;
+        return HTTP_REQ_SEND_ERR;
     }
 
     if (strcmp(http_request->req_line.method, "GET") == 0)
-        return http_request; //no body to parse
+        return HTTP_REQ_OK; //no body to parse
 
     struct_header *content_length = hash_lookup_node(http_request->headers, "content-length");
     if (content_length == NULL ) { //must have content length header
         fprintf(stderr, "no content-length.\n");
         *status_code = 400;
-        http_request_free(http_request, HTTP_FREE_HDRS);
-        return NULL;
+        return HTTP_REQ_SEND_ERR;
     }
     char *endcptr;
     long long length = strtoll(content_length->value, &endcptr, 10);
     if (content_length->value == endcptr || *endcptr != '\0') {
         fprintf(stderr, "invalid content-length.\n");
         *status_code = 400;
-        http_request_free(http_request, HTTP_FREE_HDRS);
-        return NULL; //more robust to errno=0 pre-call then check errno for overflow
+        return HTTP_REQ_SEND_ERR; //more robust to errno=0 pre-call then check errno for overflow
         //and add max_content_length
     } //length is valid, reading body:
 
     char *body_buf = malloc(length);
     if (!body_buf) {
         fprintf(stderr, "malloc failed: %s\n", strerror(errno));
-        *status_code = 500;
-        http_request_free(http_request, HTTP_FREE_HDRS);
-        return NULL;
+        *status_code = 500; //this malloc shouldn't crash the server
+        //since it may be just that the client has set a large content length
+        return HTTP_REQ_SEND_ERR;
     }
     if (length <= bytes_total) {
         memcpy(body_buf, buf, length);
@@ -300,26 +267,23 @@ struct http_request *http_request_reader(SSL *ssl, unsigned int *status_code, in
             switch (rc) {
                 case HTTP_SSL_SD_DETECT:
                     fprintf(stderr, "shutdown flag caught during SSL_read\n");
-                    http_request_free(http_request, HTTP_FREE_HDRS);
-                    *status_code = 0;
-                    *close_connection = 0; //NULL return + 0 stat code + 0 close_con will cause shutdown
-                    return NULL;
+                    free(body_buf);
+                    return HTTP_REQ_SD_DETECT;
+
                 case HTTP_SSL_CLOSED:
-                    fprintf(stderr, "client didn't complete request.\n");
-                    http_request_free(http_request, HTTP_FREE_HDRS);
-                    *close_connection = 1;
-                    *status_code = 0;
-                    return NULL;
+                    free(body_buf);
+                    return HTTP_REQ_CLOSED;
+
                 case HTTP_SSL_FATAL_ERR:
                     fprintf(stderr,"SSL_read fatal error\n");
-                    http_request_free(http_request, HTTP_FREE_HDRS);
-                    *close_connection = 0; //NULL return + 0 stat code + 0 close_con will cause shutdown
-                    return NULL;
+                    free(body_buf);
+                    return HTTP_REQ_FATAL_ERR;
+
                 case HTTP_SSL_THISCONN_ERR:
                     fprintf(stderr, "SSL_read connection specific error.\n");
-                    http_request_free(http_request, HTTP_FREE_HDRS);
-                    *close_connection = 1; //this will break the loop
-                    return NULL;
+                    free(body_buf);
+                    return HTTP_REQ_THISCONN_ERR;
+
                 case HTTP_SSL_OK:
                     bytes_total+=bytes_recvd;
             }
@@ -331,8 +295,9 @@ struct http_request *http_request_reader(SSL *ssl, unsigned int *status_code, in
     }
 
     http_request->content_length = length;
-    return http_request;
+    return HTTP_REQ_OK;
 }
+
 ssize_t parse_request_line(char *buf_start, size_t size, struct request_line *req_line, unsigned int *status_code) {
     for (ssize_t i = 0; i < size-1; i++) {
         if (buf_start[i] == '\r' && buf_start[i+1] == '\n') { //found
@@ -555,16 +520,14 @@ void http_response_free(struct http_response *http_response, int mode) {
 
 }
 
-
-ssize_t send_all(int sockfd, const void *buf, size_t len, int flags); //helper for send. unused
-
-int http_response_sender(SSL *ssl, struct http_response *http_response, int close_connection, size_t *bytes_sent) {
+enum http_res_rc http_response_sender(SSL *ssl, struct http_response *http_response,
+                                      int close_connection, size_t *bytes_sent) {
     //initialize the struct to zero before filling with data and passing here
     size_t bufsiz = BUFSIZ;
-    char *msg_buf = malloc(BUFSIZ); //free at the end, return number of bytes sent
+    char *msg_buf = malloc(bufsiz); //free at the end, return number of bytes sent
     if (msg_buf == NULL) {
         perror("malloc");
-        return -1;
+        return HTTP_RES_FATAL_ERR;
     }
 
     size_t cur_len = 0;
@@ -581,11 +544,14 @@ int http_response_sender(SSL *ssl, struct http_response *http_response, int clos
             if (temp_ptr == NULL) { \
                 perror("malloc"); \
                 free(msg_buf); \
-                return -1; \
+                return HTTP_RES_THISCONN_ERR; \
             } \
             msg_buf = temp_ptr; \
         } \
     } while(0) //wrap this boilerplate up, I don't know if this is bad practice
+    // failure of malloc (realloc) here is set to return THISCONN_ERR, because it could
+    // simply be that this client is requesting data that is too large
+
     HTTP_RESPONSE_BUF_REALLOC();
     snprintf(msg_buf + msg_len, bufsiz - msg_len, "%s", version_str);
     msg_len += cur_len; //done adding
@@ -597,7 +563,7 @@ int http_response_sender(SSL *ssl, struct http_response *http_response, int clos
                 if (http_response->stat_line.reason == NULL) { //strdup failure
                     perror("malloc");
                     free(msg_buf);
-                    return -1;
+                    return HTTP_RES_FATAL_ERR;
                 }
                 break;
             }
@@ -607,7 +573,7 @@ int http_response_sender(SSL *ssl, struct http_response *http_response, int clos
             if (http_response->stat_line.reason == NULL) { //strdup failure
                 perror("malloc");
                 free(msg_buf);
-                return -1;
+                return HTTP_RES_FATAL_ERR;
             }
         }
     }
@@ -659,31 +625,34 @@ int http_response_sender(SSL *ssl, struct http_response *http_response, int clos
         case HTTP_SSL_SD_DETECT:
             fprintf(stderr, "shutdown flag caught during SSL_write\n");
             free(msg_buf);
-            return -1;
+            return HTTP_RES_SD_DETECT;
+
         case HTTP_SSL_FATAL_ERR:
             fprintf(stderr,"SSL_write fatal error\n");
             free(msg_buf);
-            return -1;
+            return HTTP_RES_FATAL_ERR;
+
         case HTTP_SSL_THISCONN_ERR:
             fprintf(stderr, "SSL_write connection specific error.\n");
             free(msg_buf);
-            *bytes_sent = 0; //this will break out of the caller loop
-            return 0;
+            return HTTP_RES_THISCONN_ERR;
+
         case HTTP_SSL_CLOSED:
             fprintf(stderr, "server couldn't complete response.\n");
             SSL_shutdown(ssl);
             free(msg_buf);
-            *bytes_sent = 0;
-            return 0;
+            return HTTP_RES_CLOSED;
+
         case HTTP_SSL_OK:
             free(msg_buf);
             if (close_connection)
                  SSL_shutdown(ssl);
-            return 0;
+            return HTTP_RES_OK;
     }
 }
 
-ssize_t send_all(int sockfd, const void *buf, size_t len, int flags) { //unused since we have openssl
+ssize_t send_all(int sockfd, const void *buf, size_t len, int flags) {
+    //this helper was used for HTTP-only version, it's replaced by http_ssl_io_helper now
     ssize_t total_sent = 0;
     const char *p = buf;
     while (total_sent < len) {
